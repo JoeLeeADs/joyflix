@@ -6,8 +6,10 @@ RUN corepack enable && corepack prepare pnpm@latest --activate
 
 WORKDIR /app
 
-# 仅复制依赖清单，提高构建缓存利用率
-COPY package.json pnpm-lock.yaml ./
+# 仅复制依赖清单与 npm 源配置，提高构建缓存利用率
+# 注意：.npmrc 必须在这一层一起复制，否则 pnpm 会回退到默认的 registry.npmjs.org；
+# 国内网络下该源极不稳定，实测会让依赖安装停滞十几分钟。放在这里也会让「改源」正确失效缓存。
+COPY package.json pnpm-lock.yaml .npmrc ./
 
 # 安装所有依赖（含 devDependencies，后续会裁剪）
 RUN pnpm install --frozen-lockfile

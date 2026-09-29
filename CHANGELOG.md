@@ -59,6 +59,22 @@
   *附带说明*：自托管下 cron 由 `start.js` 的 `setInterval` **每小时**触发一次，
   `vercel.json` 里的 `0 1 * * *` 仅在 Vercel 生效。
 
+### 构建
+
+- **新增 `.npmrc`，把 npm 源指向 `registry.npmmirror.com`**
+  服务器位于国内，容器内 `pnpm` 原先走默认的 `registry.npmjs.org`。实测一次 Docker 构建中
+  `pnpm install --frozen-lockfile` 在最后几个包上**停滞 17 分钟且无任何进展**
+  （三条到注册表的 TCP 连接处于 ESTABLISHED 但零字节流动），整个镜像构建表现为假死。
+  本地机器因 `~/.npmrc` 早已配置镜像源所以复现不到，而容器构建上下文里没有该文件 ——
+  因此必须在仓库内声明，才能保证「本地改代码 → 服务器构建」这条链路稳定。
+  改用镜像源后，同一构建的依赖安装阶段由「10 分钟仍未完成」缩短到**约 3 分钟完成**。
+  另配 `fetch-retries=5` 与 `fetch-retry-maxtimeout=120000`，容忍镜像源抖动。
+  （npmmirror 由阿里巴巴运营；pnpm 会按 lockfile 中的 integrity 校验每个 tarball，
+  镜像即使返回被篡改的包也会因校验失败而中止，安全性有保障。）
+- **`Dockerfile` deps 阶段同步复制 `.npmrc`**（`COPY package.json pnpm-lock.yaml .npmrc ./`）。
+  这一步不可省略：deps 阶段原先只复制两个依赖清单文件，`.npmrc` 要到后面的 builder 阶段
+  才随 `COPY . .` 进入镜像，**那时依赖已经装完** —— 只加 `.npmrc` 而不改这一行是无效的。
+
 ### 验证
 
 - `pnpm typecheck`（`tsc --noEmit --incremental false`）：EXIT=0
