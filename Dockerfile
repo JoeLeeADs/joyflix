@@ -2,7 +2,16 @@
 FROM node:20-alpine AS deps
 
 # 启用 corepack 并激活 pnpm（Node20 默认提供 corepack）
-RUN corepack enable && corepack prepare pnpm@latest --activate
+#
+# 坑：corepack 下载 pnpm 本体走的是 **npm 官方源**，`.npmrc` 管不到它
+#（.npmrc 只影响 pnpm 自己安装依赖时的源）。国内网络下这一步实测会
+# DNS 解析失败（getaddrinfo EAI_AGAIN registry.npmjs.org）导致整次构建失败，
+# 0.2.5 的首次构建就是这么挂的，重试一次才通过。
+# 因此必须把 corepack 的下载源也显式指向 npmmirror，并固定版本而不是拉 latest
+#（版本以 package.json 的 packageManager 字段为准）。
+ENV COREPACK_NPM_REGISTRY=https://registry.npmmirror.com
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+RUN corepack enable && corepack prepare pnpm@10.14.0 --activate
 
 WORKDIR /app
 
@@ -16,7 +25,10 @@ RUN pnpm install --frozen-lockfile
 
 # ---- 第 2 阶段：构建项目 ----
 FROM node:20-alpine AS builder
-RUN corepack enable && corepack prepare pnpm@latest --activate
+# corepack 的 npm 源同样不可漏（原因见 deps 阶段注释）
+ENV COREPACK_NPM_REGISTRY=https://registry.npmmirror.com
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+RUN corepack enable && corepack prepare pnpm@10.14.0 --activate
 WORKDIR /app
 
 # 复制依赖
