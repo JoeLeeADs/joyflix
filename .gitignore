@@ -1,0 +1,53 @@
+# ---------- 依赖 ----------
+/node_modules
+/.pnp
+.pnp.js
+.pnpm-store
+
+# ---------- Next.js 构建产物 ----------
+/.next/
+/out/
+/build
+next-env.d.ts
+
+# ---------- 测试 ----------
+/coverage
+
+# ---------- 由 scripts/ 生成的产物（勿提交）----------
+# scripts/convert-config.js 读取 config.json 生成
+/src/lib/runtime.ts
+# scripts/generate-manifest.js 依据 NEXT_PUBLIC_SITE_NAME 生成
+/public/manifest.json
+# next-pwa 在构建时生成
+/public/sw.js
+/public/workbox-*.js
+/public/fallback-*.js
+/public/swe-worker-*.js
+
+# ---------- 环境变量（.env.example 需要提交）----------
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+!.env.example
+
+# ---------- 部署平台 ----------
+.vercel
+.netlify
+
+# ---------- 编辑器 / 工具 ----------
+.idea/
+.vscode/*
+!.vscode/extensions.json
+.workbuddy/
+
+# ---------- 系统与日志 ----------
+.DS_Store
+Thumbs.db
+*.pem
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*

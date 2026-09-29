@@ -1,0 +1,62 @@
+# ============================================================
+# Docker 构建上下文排除清单
+# 目的：
+#   1. 不要把宿主机的 node_modules 带进镜像
+#      （Dockerfile 是 COPY . . 覆盖在 deps 阶段的 node_modules 之上，
+#        宿主机若为 macOS/arm64，会覆盖成不兼容的产物）
+#   2. 不要把 .env 烘进构建层（镜像层可被解包读取）
+#   3. 缩小构建上下文，加快构建
+# ============================================================
+
+# ---------- 依赖与构建产物（容器内会重新安装/构建）----------
+node_modules
+.next
+out
+build
+coverage
+
+# ---------- 版本控制 ----------
+.git
+.gitignore
+.gitattributes
+.github
+
+# ---------- 本地环境变量（绝不进镜像）----------
+.env
+.env.local
+.env.*.local
+# 示例文件不含机密，保留以便查阅
+!.env.example
+
+# ---------- 自动生成物（构建阶段会重新生成）----------
+src/lib/runtime.ts
+public/manifest.json
+public/sw.js
+public/workbox-*.js
+public/fallback-*.js
+public/swe-worker-*.js
+
+# ---------- 文档与本地杂项 ----------
+README.md
+LICENSE
+*.md
+.DS_Store
+Thumbs.db
+.workbuddy
+.vscode
+.idea
+
+# ---------- 本地日志 ----------
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# ---------- 开发与测试配置（构建不需要）----------
+jest.config.js
+jest.setup.js
+commitlint.config.js
+.eslintrc*
+.prettierrc*
+proxy.worker.js
+vercel.json

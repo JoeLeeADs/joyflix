@@ -57,14 +57,18 @@ const MobileBottomNav = ({ activePath }: MobileBottomNavProps) => {
   useEffect(() => {
     const runtimeConfig = (window as any).RUNTIME_CONFIG;
     if (runtimeConfig?.CUSTOM_CATEGORIES?.length > 0) {
-      setNavItems((prevItems) => [
-        ...prevItems,
-        {
-          icon: CircleEllipsis,
-          label: '更多',
-          href: '/douban?type=custom',
-        },
-      ]);
+      setNavItems((prevItems) =>
+        prevItems.some((item) => item.href === '/douban?type=custom')
+          ? prevItems
+          : [
+              ...prevItems,
+              {
+                icon: CircleEllipsis,
+                label: '更多',
+                href: '/douban?type=custom',
+              },
+            ]
+      );
     }
   }, []);
 

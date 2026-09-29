@@ -13,7 +13,7 @@ export async function GET(request: NextRequest) {
   try {
     console.log('Cron job triggered:', new Date().toISOString());
 
-    refreshRecordAndFavorites();
+    await refreshRecordAndFavorites();
 
     return NextResponse.json({
       success: true,

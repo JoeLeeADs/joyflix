@@ -114,14 +114,18 @@ const Sidebar = ({ activePath = '/', isTabletMode = false, onCategorySelect }: S
   useEffect(() => {
     const runtimeConfig = (window as any).RUNTIME_CONFIG;
     if (runtimeConfig?.CUSTOM_CATEGORIES?.length > 0) {
-      setMenuItems((prevItems) => [
-        ...prevItems,
-        {
-          icon: CircleEllipsis,
-          label: '更多',
-          href: '/douban?type=custom',
-        },
-      ]);
+      setMenuItems((prevItems) =>
+        prevItems.some((item) => item.href === '/douban?type=custom')
+          ? prevItems
+          : [
+              ...prevItems,
+              {
+                icon: CircleEllipsis,
+                label: '更多',
+                href: '/douban?type=custom',
+              },
+            ]
+      );
     }
   }, []);
 

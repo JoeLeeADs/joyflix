@@ -49,7 +49,7 @@ const CustomSelect: React.FC<CustomSelectProps> = ({
 
     document.addEventListener('click', handleClickOutside);
     return () => {
-      document.removeEventListener('mousedown', handleClickOutside);
+      document.removeEventListener('click', handleClickOutside);
     };
   }, []);
 
