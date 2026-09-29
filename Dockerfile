@@ -37,8 +37,16 @@ RUN pnpm run build
 # ---- 第 3 阶段：生成运行时镜像 ----
 FROM node:20-alpine AS runner
 
+# 镜像版本号，构建时可用 --build-arg APP_VERSION=x.y.z 覆盖
+ARG APP_VERSION=0.2.0
+
 # 创建非 root 用户
 RUN addgroup -g 1001 -S nodejs && adduser -u 1001 -S nextjs -G nodejs
+
+LABEL org.opencontainers.image.title="joyflix" \
+      org.opencontainers.image.version="${APP_VERSION}" \
+      org.opencontainers.image.source="https://github.com/JoeLeeADs/joyflix" \
+      org.opencontainers.image.description="JoyFlix - 基于 jeffernn/joyflix 的个人优化分支"
 
 WORKDIR /app
 ENV NODE_ENV=production

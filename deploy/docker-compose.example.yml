@@ -1,0 +1,55 @@
+# JoyFlix 部署编排示例
+#
+# 用法：
+#   1. 复制为 docker-compose.yml
+#   2. 在同目录创建 .env，填入 USERNAME / PASSWORD
+#   3. docker compose up -d
+#
+# 重要：NEXT_PUBLIC_* 是构建期内联变量，在这里改不生效，必须重新构建镜像。
+#       详见仓库根目录的 .env.example。
+
+services:
+  joyflix-core:
+    # 生产建议替换为自己构建并锁定 tag 的镜像，例如 joyflix:0.2.0
+    image: ghcr.io/jeffernn/joyflix:latest
+    container_name: joyflix-core
+    restart: unless-stopped
+    ports:
+      - '3000:3000'
+    environment:
+      - USERNAME=${USERNAME:?必须设置 USERNAME}
+      - PASSWORD=${PASSWORD:?必须设置 PASSWORD，否则所有访问会被重定向到 /warning}
+      - NEXT_PUBLIC_STORAGE_TYPE=redis
+      - REDIS_URL=redis://joyflix-redis:6379
+    networks:
+      - joyflix-network
+    depends_on:
+      - joyflix-redis
+    # 如需自定义站点配置（分类、源、站点名等），挂载 config.json
+    # volumes:
+    #   - ./config.json:/app/config.json:ro
+
+  joyflix-redis:
+    image: redis:alpine
+    container_name: joyflix-redis
+    restart: unless-stopped
+    # 持久化：RDB 快照 + AOF 追加日志双开
+    #   --appendonly yes       开启 AOF
+    #   --appendfsync everysec 每秒 fsync，进程崩溃时最多丢 1 秒数据
+    #
+    # 迁移须知（已在 2026-09-29 实际踩过）：
+    # Redis 7 在 appendonly=yes 时只加载 AOF；若 appendonlydir 不存在，
+    # 它会直接创建一个空 AOF 并跳过 dump.rdb，结果是以空库启动、数据「看起来丢了」。
+    # 因此从「无挂载、无持久化」迁移到 AOF 时，正确顺序是：
+    #   1) 先以 appendonly=no 启动，让它加载一次已有的 dump.rdb
+    #   2) 执行 redis-cli CONFIG SET appendonly yes，把当前数据集写成 AOF
+    #   3) 再把 --appendonly yes 固化回本文件并重启验证
+    command: redis-server --appendonly yes --appendfsync everysec
+    volumes:
+      - ./data:/data
+    networks:
+      - joyflix-network
+
+networks:
+  joyflix-network:
+    driver: bridge
