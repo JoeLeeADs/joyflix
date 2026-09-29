@@ -40,7 +40,7 @@ RUN pnpm run build
 FROM node:20-alpine AS runner
 
 # 镜像版本号，构建时可用 --build-arg APP_VERSION=x.y.z 覆盖
-ARG APP_VERSION=0.2.4
+ARG APP_VERSION=0.2.5
 
 # 创建非 root 用户
 RUN addgroup -g 1001 -S nodejs && adduser -u 1001 -S nextjs -G nodejs
