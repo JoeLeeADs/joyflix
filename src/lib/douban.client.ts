@@ -89,6 +89,34 @@ async function fetchWithTimeout(
   }
 }
 
+/**
+ * 请求本站自己的豆瓣代理接口（direct 模式）。
+ *
+ * 必须显式超时：原先这三个分支用的是裸 fetch，一旦服务端接口挂住，
+ * 首页 / 分类页的 loading 就永远不会结束，表现为无限骨架屏。
+ */
+const INTERNAL_API_TIMEOUT_MS = 15000;
+
+async function fetchInternalDoubanApi(url: string): Promise<DoubanResult> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(
+    () => controller.abort(),
+    INTERNAL_API_TIMEOUT_MS
+  );
+
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+
+    if (!response.ok) {
+      throw new Error(`HTTP error! Status: ${response.status}`);
+    }
+
+    return (await response.json()) as DoubanResult;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 function getDoubanProxyConfig(): {
   proxyType:
     | 'direct'
@@ -206,11 +234,9 @@ export async function getDoubanCategories(
       return fetchDoubanCategories(params, proxyUrl);
     case 'direct':
     default:
-      const response = await fetch(
+      return fetchInternalDoubanApi(
         `/api/douban/categories?kind=${kind}&category=${category}&type=${type}&limit=${pageLimit}&start=${pageStart}`
       );
-
-      return response.json();
   }
 }
 
@@ -238,11 +264,9 @@ export async function getDoubanList(
       return fetchDoubanList(params, proxyUrl);
     case 'direct':
     default:
-      const response = await fetch(
+      return fetchInternalDoubanApi(
         `/api/douban?tag=${tag}&type=${type}&pageSize=${pageLimit}&pageStart=${pageStart}`
       );
-
-      return response.json();
   }
 }
 
@@ -357,11 +381,9 @@ export async function getDoubanRecommends(
       return fetchDoubanRecommends(params, proxyUrl);
     case 'direct':
     default:
-      const response = await fetch(
+      return fetchInternalDoubanApi(
         `/api/douban/recommends?kind=${kind}&limit=${pageLimit}&start=${pageStart}&category=${category}&format=${format}&region=${region}&year=${year}&platform=${platform}&sort=${sort}&label=${label}`
       );
-
-      return response.json();
   }
 }
 

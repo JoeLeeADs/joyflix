@@ -48,6 +48,9 @@ function HomeClient() {
   const [bangumiCalendarData, setBangumiCalendarData] = useState<
     BangumiCalendarData[]
   >([]);
+  // 番剧日历是否已有结果（成功为空或超时失败都算"已就绪"），
+  // 用于在 bgm.tv 不可达时优雅隐藏"热门番剧"整块，而不是留一行空白。
+  const [bangumiLoaded, setBangumiLoaded] = useState(false);
   const [loading, setLoading] = useState(true);
   const { announcement } = useSite();
 
@@ -89,43 +92,63 @@ function HomeClient() {
 
   useEffect(() => {
     const fetchRecommendData = async () => {
+      // 番剧日历独立异步加载：bgm.tv 在国内网络可能长时间无响应，
+      // 绝不能参与骨架屏判定，否则首页会永久卡在加载态（历史事故，见 bangumi.client.ts）。
+      const bangumiPromise = GetBangumiCalendarData();
+
       try {
         setLoading(true);
 
-        // 并行获取热门电影、热门剧集和热门综艺
-        const [moviesData, tvShowsData, varietyShowsData, bangumiCalendarData] =
+        // 豆瓣板块各自独立容错：任一失败只影响自己，不拖垮整页。
+        const [moviesData, tvShowsData, varietyShowsData, customCategoryData] =
           await Promise.all([
             getDoubanCategories({
               kind: 'movie',
               category: '热门',
               type: '全部',
+            }).catch((error) => {
+              console.error('获取热门电影失败:', error);
+              return null;
             }),
-            getDoubanCategories({ kind: 'tv', category: 'tv', type: 'tv' }),
-            getDoubanCategories({ kind: 'tv', category: 'show', type: 'show' }),
-            GetBangumiCalendarData(),
+            getDoubanCategories({ kind: 'tv', category: 'tv', type: 'tv' }).catch(
+              (error) => {
+                console.error('获取热门剧集失败:', error);
+                return null;
+              }
+            ),
+            getDoubanCategories({
+              kind: 'tv',
+              category: 'show',
+              type: 'show',
+            }).catch((error) => {
+              console.error('获取热门综艺失败:', error);
+              return null;
+            }),
+            // 自定义分类数据：电影 - 华语
+            getDoubanList({
+              tag: '华语',
+              type: 'movie',
+              pageLimit: 25,
+              pageStart: 0,
+            }).catch((error) => {
+              console.error('获取华语电影失败:', error);
+              return null;
+            }),
           ]);
 
-        if (moviesData.code === 200) {
+        if (moviesData?.code === 200) {
           setHotMovies(moviesData.list);
         }
 
-        if (tvShowsData.code === 200) {
+        if (tvShowsData?.code === 200) {
           setHotTvShows(tvShowsData.list);
         }
 
-        if (varietyShowsData.code === 200) {
+        if (varietyShowsData?.code === 200) {
           setHotVarietyShows(varietyShowsData.list);
         }
-        setBangumiCalendarData(bangumiCalendarData);
 
-        // 获取自定义分类数据：电影 - 华语
-        const customCategoryData = await getDoubanList({
-          tag: '华语',
-          type: 'movie',
-          pageLimit: 25,
-          pageStart: 0,
-        });
-        if (customCategoryData.code === 200) {
+        if (customCategoryData?.code === 200) {
           setHotCustomCategory(customCategoryData.list);
         }
       } catch (error) {
@@ -133,6 +156,12 @@ function HomeClient() {
       } finally {
         setLoading(false);
       }
+
+      // 番剧数据到齐（或超时/失败）后单独落地，不参与上面的骨架屏节奏。
+      bangumiPromise
+        .then((data) => setBangumiCalendarData(data))
+        .catch(() => setBangumiCalendarData([]))
+        .finally(() => setBangumiLoaded(true));
     };
 
     fetchRecommendData();
@@ -196,6 +225,19 @@ function HomeClient() {
     setShowAnnouncement(false);
     localStorage.setItem('hasSeenAnnouncement', announcement); // 记录已查看弹窗
   };
+
+  // 当前日期对应的每日放送番剧
+  const todayAnimes = (() => {
+    const weekdays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    const currentWeekday = weekdays[new Date().getDay()];
+    return (
+      bangumiCalendarData.find((item) => item.weekday.en === currentWeekday)
+        ?.items || []
+    );
+  })();
+
+  // 番剧日历未就绪时保留骨架屏；就绪后若确实没有数据（bgm.tv 不可达）则整块隐藏。
+  const showBangumiSection = !bangumiLoaded || todayAnimes.length > 0;
 
   return (
     <PageLayout>
@@ -354,52 +396,35 @@ function HomeClient() {
                 </ScrollableRow>
               </section>
 
-              {/* 每日新番放送 */}
-              <section className='mb-8'>
-                <div className='mb-4 flex items-center justify-between'>
-                  <h2
-                    onClick={() => {
-                      window.dispatchEvent(new CustomEvent('clearHomepageScroll'));
-                      router.push('/douban?type=anime');
-                    }}
-                    className='text-xl font-bold text-gray-800 dark:text-gray-200 flex items-center cursor-pointer hover:text-gray-900 dark:hover:text-white hover:scale-[1.02] transition-transform duration-200'
-                  >
-                    热门番剧
-                    <ChevronRight className='w-5 h-5 ml-1' />
-                  </h2>
-                </div>
-                <ScrollableRow>
-                  {loading
-                    ? // 加载状态显示灰色占位数据
-                      Array.from({ length: 8 }).map((_, index) => (
-                        <VideoCardSkeleton
-                          key={index}
-                          className="min-w-[96px] w-24 sm:min-w-[180px] sm:w-44"
-                          showYear={true}
-                        />
-                      ))
-                    : // 展示当前日期的番剧
-                      (() => {
-                        // 获取当前日期对应的星期
-                        const today = new Date();
-                        const weekdays = [
-                          'Sun',
-                          'Mon',
-                          'Tue',
-                          'Wed',
-                          'Thu',
-                          'Fri',
-                          'Sat',
-                        ];
-                        const currentWeekday = weekdays[today.getDay()];
-
-                        // 找到当前星期对应的番剧数据
-                        const todayAnimes =
-                          bangumiCalendarData.find(
-                            (item) => item.weekday.en === currentWeekday
-                          )?.items || [];
-
-                        return todayAnimes.map((anime, index) => (
+              {/* 每日新番放送（bgm.tv 不可达时整块隐藏，不留空白行） */}
+              {showBangumiSection && (
+                <section className='mb-8'>
+                  <div className='mb-4 flex items-center justify-between'>
+                    <h2
+                      onClick={() => {
+                        window.dispatchEvent(
+                          new CustomEvent('clearHomepageScroll')
+                        );
+                        router.push('/douban?type=anime');
+                      }}
+                      className='text-xl font-bold text-gray-800 dark:text-gray-200 flex items-center cursor-pointer hover:text-gray-900 dark:hover:text-white hover:scale-[1.02] transition-transform duration-200'
+                    >
+                      热门番剧
+                      <ChevronRight className='w-5 h-5 ml-1' />
+                    </h2>
+                  </div>
+                  <ScrollableRow>
+                    {loading || !bangumiLoaded
+                      ? // 加载状态显示灰色占位数据
+                        Array.from({ length: 8 }).map((_, index) => (
+                          <VideoCardSkeleton
+                            key={index}
+                            className='min-w-[96px] w-24 sm:min-w-[180px] sm:w-44'
+                            showYear={true}
+                          />
+                        ))
+                      : // 展示当前日期的番剧
+                        todayAnimes.map((anime, index) => (
                           <div
                             key={`${anime.id}-${index}`}
                             className='min-w-[96px] w-24 sm:min-w-[180px] sm:w-44'
@@ -420,10 +445,10 @@ function HomeClient() {
                               isBangumi={true}
                             />
                           </div>
-                        ));
-                      })()}
-                </ScrollableRow>
-              </section>
+                        ))}
+                  </ScrollableRow>
+                </section>
+              )}
 
               {/* 热门综艺 */}
               <section className='mb-8'>
