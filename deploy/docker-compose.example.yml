@@ -21,6 +21,12 @@ services:
       - PASSWORD=${PASSWORD:?必须设置 PASSWORD，否则所有访问会被重定向到 /warning}
       - NEXT_PUBLIC_STORAGE_TYPE=redis
       - REDIS_URL=redis://joyflix-redis:6379
+      # libuv 线程池大小。getaddrinfo（DNS 解析）跑在这个池上，Node 默认只给 4 个线程；
+      # 本站搜索会同时请求 27 个采集源，27 个域名解析被排进 4 个槽位，排队时间会超过
+      # searchFromApi 的 8 秒超时，现象是「所有源一起失灵」——搜索返回空、定时任务
+      # 收藏刷新成批失败，且日志里看不到任何网络错误。Dockerfile 已内置 ENV 默认值，
+      # 这里显式写出是为了让部署配置自解释；如无特殊需要可删掉。
+      - UV_THREADPOOL_SIZE=16
     networks:
       - joyflix-network
     depends_on:

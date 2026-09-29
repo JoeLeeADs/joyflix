@@ -207,6 +207,13 @@ export async function searchFromApi(
 
     return results;
   } catch (error) {
+    // 不要静默吞掉：这里是「源访问失败」与「源里没有这部片」唯一的区分点。
+    // 静默返回 [] 会让上层把网络故障误报成「未在任何可用源中找到匹配的影片」，
+    // 排查时看不见任何真因（曾因此把一次线上问题误判成「源不可用」而绕了远路）。
+    console.warn(
+      `[searchFromApi] 源访问失败 ${apiSite.name}（关键词「${query}」）:`,
+      error instanceof Error ? error.message : String(error)
+    );
     return [];
   }
 }

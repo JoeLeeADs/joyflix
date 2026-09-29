@@ -19,6 +19,39 @@ type ApiSite = Awaited<ReturnType<typeof getAvailableApiSites>>[number];
  */
 const SEARCH_TIMEOUT_MS = 15000;
 
+/**
+ * 同时并发搜索的源数量上限。
+ * 本站有 27 个采集源，一次性全部放开会把 libuv 的 DNS 解析队列打满
+ * （getaddrinfo 跑在线程池上，默认仅 4 个线程，见 Dockerfile 里的 UV_THREADPOOL_SIZE 说明），
+ * 解析排队时间会超过搜索超时，表现为「所有源同时失灵」。这里留出余量。
+ */
+const SEARCH_CONCURRENCY = 10;
+
+/** 以受限并发执行任务，返回结果与输入顺序严格对齐。 */
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  worker: (item: T) => Promise<R>
+): Promise<R[]> {
+  const results: R[] = new Array<R>(items.length);
+  let cursor = 0;
+
+  const runnerCount = Math.max(1, Math.min(limit, items.length));
+  const runners = Array.from({ length: runnerCount }, async () => {
+    for (;;) {
+      const index = cursor;
+      cursor += 1;
+      if (index >= items.length) {
+        return;
+      }
+      results[index] = await worker(items[index]);
+    }
+  });
+
+  await Promise.all(runners);
+  return results;
+}
+
 const CN_DIGITS: Record<string, number> = {
   零: 0,
   一: 1,
@@ -78,29 +111,36 @@ async function searchFromApiSafely(
       searchFromApi(apiSite, query),
       new Promise<SearchResult[]>((_, reject) =>
         setTimeout(
-          () => reject(new Error(`${apiSite.name} 搜索超时`)),
+          () => reject(new Error(`${SEARCH_TIMEOUT_MS / 1000} 秒搜索超时`)),
           SEARCH_TIMEOUT_MS
         )
       ),
     ]);
-  } catch {
+  } catch (error) {
+    // 必须留下痕迹：「源访问失败」与「源里没有这部片」最终都会走到
+    // 「未在任何可用源中找到匹配的影片」，只有这里能区分二者。
+    console.warn(
+      `搜索源失败 [${apiSite.name}]（关键词「${query}」）:`,
+      error instanceof Error ? error.message : String(error)
+    );
     return [];
   }
 }
 
 /**
- * 并行搜索全部可用源，返回结果数组与传入的 apiSites 顺序严格对齐。
+ * 并发但限流地搜索全部可用源，返回结果数组与传入的 apiSites 顺序严格对齐。
  *
- * 之所以并行：串行搜索 27 个源时，只要有一个源挂死，单个片名就要等上数十秒，
- * 29 个收藏累积下来能把一次 cron 跑成十几分钟（实测确实如此）。并行后单次搜索的
- * 耗时上限由「各源耗时之和」降为「最慢单源（且被 15s 超时兜住）」。
- * 这与 /api/search 的既有做法一致。
+ * 之所以并发：串行搜索 27 个源时，只要有一个源挂死，单个片名就要等上数十秒，
+ * 29 个收藏累积下来能把一次 cron 跑成十几分钟（实测确实如此）。
+ * 之所以限流：完全放开 27 路并发会把 DNS 解析线程池打满，反而让全部请求一起超时。
  */
 async function searchAllSites(
   apiSites: ApiSite[],
   query: string
 ): Promise<SearchResult[][]> {
-  return Promise.all(apiSites.map((site) => searchFromApiSafely(site, query)));
+  return mapWithConcurrency(apiSites, SEARCH_CONCURRENCY, (site) =>
+    searchFromApiSafely(site, query)
+  );
 }
 
 /** 在按源优先级排列的结果里，找出第一个标题归一化后等于 target 的影片。 */

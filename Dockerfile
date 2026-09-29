@@ -40,7 +40,7 @@ RUN pnpm run build
 FROM node:20-alpine AS runner
 
 # 镜像版本号，构建时可用 --build-arg APP_VERSION=x.y.z 覆盖
-ARG APP_VERSION=0.2.2
+ARG APP_VERSION=0.2.3
 
 # 创建非 root 用户
 RUN addgroup -g 1001 -S nodejs && adduser -u 1001 -S nextjs -G nodejs
@@ -55,6 +55,13 @@ ENV NODE_ENV=production
 ENV HOSTNAME=0.0.0.0
 ENV PORT=3000
 ENV DOCKER_ENV=true
+# 关键：放大 libuv 线程池。Node 的 DNS 解析（getaddrinfo）跑在 libuv 线程池上，
+# 默认只有 4 个线程。本站搜索要同时对 27 个采集源发起请求，27 个域名解析会被排进
+# 只有 4 个槽位的队列；排队时间一旦超过 searchFromApi 的 8 秒超时，就会表现为
+# 「所有源同时失灵」——搜索返回 0 结果、定时任务收藏刷新成批失败。
+# 实测（同一台服务器）：默认 4 线程时 24 个片名里只有 2 个能搜到；设为 16 后提升到 17 个。
+# 放在镜像里而不是只写在 compose 里，避免换部署环境时被漏掉。
+ENV UV_THREADPOOL_SIZE=16
 
 # 从构建器中复制 standalone 输出
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
