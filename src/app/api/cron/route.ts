@@ -2,6 +2,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 
+import { acquireCronLock, releaseCronLock } from '@/lib/cronLock';
 import { db } from '@/lib/db';
 import { fetchVideoDetail } from '@/lib/fetchVideoDetail';
 import { SearchResult } from '@/lib/types';
@@ -10,14 +11,51 @@ export const runtime = 'edge';
 
 export async function GET(request: NextRequest) {
   console.log(request.url);
+
+  // 调用方鉴权（可选）：配置了 CRON_TOKEN 时校验，未配置则保持原先的开放行为。
+  // 本路由在 middleware 的鉴权豁免名单内，若不校验，任何能访问站点的人
+  // 都能触发一次全量刷新（重活），生产环境建议配置。
+  const expectedToken = process.env.CRON_TOKEN;
+  if (expectedToken) {
+    const provided =
+      request.headers.get('x-cron-token') ||
+      request.nextUrl.searchParams.get('token');
+    if (provided !== expectedToken) {
+      console.warn('Cron job rejected: invalid token');
+      return NextResponse.json(
+        { success: false, message: 'Cron job rejected: invalid token' },
+        { status: 401 }
+      );
+    }
+  }
+
+  // 互斥：同一时刻只允许一个刷新任务在跑（开机触发 / 手动触发 / 多实例共存都能拦住）
+  const lock = await acquireCronLock();
+  if (!lock.acquired) {
+    console.warn('Cron job skipped: another run is in progress');
+    return NextResponse.json({
+      success: true,
+      skipped: true,
+      message: 'Cron job skipped: another run is in progress',
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  const startedAt = Date.now();
+
   try {
     console.log('Cron job triggered:', new Date().toISOString());
 
     await refreshRecordAndFavorites();
 
+    const costMs = Date.now() - startedAt;
+    console.log(`Cron job finished in ${costMs}ms`);
+
     return NextResponse.json({
       success: true,
+      skipped: false,
       message: 'Cron job executed successfully',
+      costMs,
       timestamp: new Date().toISOString(),
     });
   } catch (error) {
@@ -26,12 +64,17 @@ export async function GET(request: NextRequest) {
     return NextResponse.json(
       {
         success: false,
+        skipped: false,
         message: 'Cron job failed',
+        costMs: Date.now() - startedAt,
         error: error instanceof Error ? error.message : 'Unknown error',
         timestamp: new Date().toISOString(),
       },
       { status: 500 }
     );
+  } finally {
+    // 无论成功、失败都释放锁，避免下一次调度被自己的锁挡住
+    await releaseCronLock(lock);
   }
 }
 

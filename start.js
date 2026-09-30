@@ -31,6 +31,16 @@ const TARGET_URL = `http://${process.env.HOSTNAME || 'localhost'}:${
   process.env.PORT || 3000
 }/login`;
 
+// cron 调度间隔：1 小时
+const CRON_INTERVAL_MS = 60 * 60 * 1000;
+// cron 请求超时：服务端任务实测 2~4 分钟，客户端超时必须显著大于它，
+// 否则每次都会打出误导性的 "Cron job timeout"（服务端其实还在正常执行）
+const CRON_TIMEOUT_MS = 10 * 60 * 1000;
+
+// 进程内互斥：上一次 cron 还没结束就不再发起新的请求
+let cronRunning = false;
+let cronTimer = null;
+
 const intervalId = setInterval(() => {
   console.log(`Fetching ${TARGET_URL} ...`);
 
@@ -40,13 +50,8 @@ const intervalId = setInterval(() => {
       console.log('Server is up, stop polling.');
       clearInterval(intervalId);
 
-      // 服务器启动后，立即执行一次 cron 任务
+      // 服务器启动后立即执行一次 cron 任务，之后每小时一次
       executeCronJob();
-
-      // 然后设置每小时执行一次 cron 任务
-      setInterval(() => {
-        executeCronJob();
-      }, 60 * 60 * 1000); // 每小时执行一次
     }
   });
 
@@ -55,15 +60,50 @@ const intervalId = setInterval(() => {
   });
 }, 1000);
 
+// 排定下一次 cron（上一次结束后再排，避免任务超时导致调度堆积）
+function scheduleNextCron() {
+  if (cronTimer) {
+    clearTimeout(cronTimer);
+  }
+  cronTimer = setTimeout(() => {
+    cronTimer = null;
+    executeCronJob();
+  }, CRON_INTERVAL_MS);
+}
+
 // 执行 cron 任务的函数
 function executeCronJob() {
+  if (cronRunning) {
+    console.warn(
+      'Cron job skipped: previous run is still in progress (in-process lock)'
+    );
+    scheduleNextCron();
+    return;
+  }
+  cronRunning = true;
+
   const cronUrl = `http://${process.env.HOSTNAME || 'localhost'}:${
     process.env.PORT || 3000
   }/api/cron`;
 
   console.log(`Executing cron job: ${cronUrl}`);
 
-  const req = http.get(cronUrl, (res) => {
+  // 请求可能同时触发 end / error / timeout，只处理第一次
+  let settled = false;
+  const finish = () => {
+    if (settled) return;
+    settled = true;
+    cronRunning = false;
+    scheduleNextCron();
+  };
+
+  const options = {};
+  if (process.env.CRON_TOKEN) {
+    // 与 /api/cron 的 CRON_TOKEN 校验配套
+    options.headers = { 'x-cron-token': process.env.CRON_TOKEN };
+  }
+
+  const req = http.get(cronUrl, options, (res) => {
     let data = '';
 
     res.on('data', (chunk) => {
@@ -76,15 +116,18 @@ function executeCronJob() {
       } else {
         console.error('Cron job failed:', res.statusCode, data);
       }
+      finish();
     });
   });
 
   req.on('error', (err) => {
     console.error('Error executing cron job:', err);
+    finish();
   });
 
-  req.setTimeout(30000, () => {
+  req.setTimeout(CRON_TIMEOUT_MS, () => {
     console.error('Cron job timeout');
     req.destroy();
+    finish();
   });
 }

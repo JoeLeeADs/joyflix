@@ -343,6 +343,27 @@ export class UpstashRedisStorage implements IStorage {
 
     return configs;
   }
+
+  // ---------- 分布式锁（定时任务互斥） ----------
+  async acquireLock(
+    key: string,
+    token: string,
+    ttlSeconds: number
+  ): Promise<boolean> {
+    const res = await withRetry(() =>
+      this.client.set(key, token, { nx: true, ex: ttlSeconds })
+    );
+    return res === 'OK';
+  }
+
+  async releaseLock(key: string, token: string): Promise<boolean> {
+    // 仅当锁仍属于自己时才删除，Lua 保证 compare-and-del 原子
+    const script = `if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) end return 0`;
+    const res = await withRetry(() =>
+      this.client.eval(script, [key], [token])
+    );
+    return Number(res) === 1;
+  }
 }
 
 // 单例 Upstash Redis 客户端

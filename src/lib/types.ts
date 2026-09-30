@@ -80,6 +80,16 @@ export interface IStorage {
   ): Promise<void>;
   deleteSkipConfig(userName: string, source: string, id: string): Promise<void>;
   getAllSkipConfigs(userName: string): Promise<{ [key: string]: SkipConfig }>;
+
+  // 分布式锁（可选实现，用于定时任务互斥）
+  // 原子占锁：成功返回 true，锁已被他人持有返回 false
+  acquireLock?(
+    key: string,
+    token: string,
+    ttlSeconds: number
+  ): Promise<boolean>;
+  // 释放锁：仅当锁仍属于 token 持有者时才真正删除
+  releaseLock?(key: string, token: string): Promise<boolean>;
 }
 
 export interface Recommendation {

@@ -218,6 +218,26 @@ export class DbManager {
     }
     return {};
   }
+
+  // ---------- 分布式锁（定时任务互斥） ----------
+  // 后端未实现锁时返回 true（不阻塞任务）；localstorage 模式下定时任务本身是空操作
+  async acquireLock(
+    key: string,
+    token: string,
+    ttlSeconds: number
+  ): Promise<boolean> {
+    if (typeof (this.storage as any)?.acquireLock === 'function') {
+      return (this.storage as any).acquireLock(key, token, ttlSeconds);
+    }
+    return true;
+  }
+
+  async releaseLock(key: string, token: string): Promise<boolean> {
+    if (typeof (this.storage as any)?.releaseLock === 'function') {
+      return (this.storage as any).releaseLock(key, token);
+    }
+    return true;
+  }
 }
 
 // 导出默认实例

@@ -13,6 +13,48 @@
   29 个 API 路由中有 18 个缺少自建鉴权、`/api/image-proxy` 与 `/api/admin/test-proxy` 存在 SSRF、
   以及 `Dockerfile` 依赖 `sed` 改写源码且失配时不报错。
 
+## [0.2.7] - 2026-09-30
+
+本版处理 0.2.2 起挂账的**定时任务并发问题**：`/api/cron` 全量刷新可能被并发触发，
+让采集源负载翻倍。同时补上该路由**唯一的访问保护**，并修正每次调度都会打出的误导性超时日志。
+
+### 修复
+
+- **定时任务没有互斥保护，开机触发与手动触发会并发** `src/app/api/cron/route.ts`、
+  `src/lib/cronLock.ts`、`src/lib/{types,db,redis.db,upstash.db}.ts`
+  *现象*：`start.js` 在服务起来后立即触发一次刷新、之后每小时一次；同时 `/api/cron`
+  在 middleware 的鉴权豁免名单内，任何能访问站点的人都能手动触发。两条路径没有互斥，
+  实测同一天出现过并发（开机触发 + 手工验证触发），会让 27 个采集源负载翻倍。
+  *修复*：引入存储层的原子锁（`SET key token NX EX ttl`，释放走 Lua 的 compare-and-del，
+  只有持有者能解），锁的 TTL 取 30 分钟——远大于单次任务实测的 2~4 分钟，
+  又小于 1 小时的调度周期，进程被 kill 时最多影响一次调度而不会永久卡死。
+  未抢到锁的请求**不执行刷新**，直接返回 `{ success: true, skipped: true }`（HTTP 200，
+  不记为失败，避免调度侧误报）。
+  - `src/lib/redis.db.ts` / `src/lib/upstash.db.ts` 各自实现 `acquireLock` / `releaseLock`，
+    经 `DbManager` 透出；`localstorage` 模式没有后端，视为无条件放行（该模式下刷新本身是空操作）。
+  - 锁后端异常时 **fail-open**（不加锁继续执行），避免因为锁本身让定时任务彻底停摆，但会打印明确日志。
+
+- **`/api/cron` 无任何访问保护** `src/app/api/cron/route.ts`、`start.js`、`.env.example`
+  *现象*：该路由被 middleware 豁免鉴权，又不带任何自建校验，等于把一个耗时数分钟、
+  会打满采集源的重活暴露给所有能访问该站点的人（含 Cloudflare Tunnel 的公开域名）。
+  *修复*：新增可选环境变量 `CRON_TOKEN`。配置后必须带 `x-cron-token` 请求头或
+  `?token=` 查询参数才执行，否则返回 401；**未配置则保持原行为**（向后兼容）。
+  容器内的 `start.js` 会自动携带该头，手动触发改为
+  `curl "http://<站点>/api/cron?token=<CRON_TOKEN>"`。
+
+- **每次调度都会打出误导性的 `Cron job timeout` / `socket hang up`** `start.js`
+  *现象*：客户端对 `/api/cron` 的超时写死 30 秒，而服务端任务实测 2~4 分钟，
+  于是每小时日志里必然出现「Cron job timeout → ECONNRESET」，看起来像故障，
+  实际服务端仍在后台跑完（宿主机 `docker logs` 可确认任务正常结束）。
+  *修复*：客户端超时改为 10 分钟，`end` 分支得以真正拿到执行结果并打印耗时。
+
+### 优化
+
+- **`start.js` 调度改为「上一轮结束后再排下一轮」** `start.js`
+  由固定 `setInterval` 改为自排程 `setTimeout` 链，并加进程内互斥标志：
+  单次任务一旦超过调度周期也不会叠加堆积；同一进程内绝不并发。
+  这层与上面的分布式锁是**双保险**（前者防同进程，后者防多实例 / 手动触发）。
+
 ## [0.2.6] - 2026-09-30
 
 ### 新增

@@ -362,6 +362,28 @@ export class RedisStorage implements IStorage {
 
     return configs;
   }
+
+  // ---------- 分布式锁（定时任务互斥） ----------
+  async acquireLock(
+    key: string,
+    token: string,
+    ttlSeconds: number
+  ): Promise<boolean> {
+    // SET key token NX EX ttl：原子占锁，锁已被持有则返回 null
+    const res = await withRetry(() =>
+      this.client.set(key, token, { NX: true, EX: ttlSeconds })
+    );
+    return res === 'OK';
+  }
+
+  async releaseLock(key: string, token: string): Promise<boolean> {
+    // 仅当锁仍属于自己时才删除，Lua 保证 compare-and-del 原子
+    const script = `if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) end return 0`;
+    const res = await withRetry(() =>
+      this.client.eval(script, { keys: [key], arguments: [token] })
+    );
+    return Number(res) === 1;
+  }
 }
 
 // 单例 Redis 客户端

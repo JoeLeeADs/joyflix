@@ -27,6 +27,9 @@ services:
       # 收藏刷新成批失败，且日志里看不到任何网络错误。Dockerfile 已内置 ENV 默认值，
       # 这里显式写出是为了让部署配置自解释；如无特殊需要可删掉。
       - UV_THREADPOOL_SIZE=16
+      # 触发 /api/cron 全量刷新所需的共享令牌。不设置则接口对所有人开放
+      # （该路由在鉴权豁免名单内），生产环境建议设置：openssl rand -base64 32
+      - CRON_TOKEN=${CRON_TOKEN:-}
     networks:
       - joyflix-network
     depends_on:
