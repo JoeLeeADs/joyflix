@@ -294,3 +294,34 @@ html.dark .swal2-speed-test-white-bg {
   background: transparent !important;
   color: inherit !important;
 }
+
+/* ---------------------------------------------------------------------------
+   iOS 上 <video> 元素带**原生长按行为**：长按会弹出圆形放大镜 + 文字选择手柄。
+   这个行为在 UA 层，`user-select: none` / `-webkit-touch-callout: none` 都压不住
+   —— 实测 video / .art-video-player / .jf-player 三层的计算值都已经 none，真机上
+   仍然会弹，所以"补 CSS"这条路是走不通的。
+
+   解法：让 <video> 不再作为指针事件的目标。事件会落到外层的 .art-video-player
+   （一个普通 div，上一段规则能完全控制它），iOS 就不再把它当作"可选中的媒体"。
+   点击由 page.tsx 的手势层转发回 <video>，而 artplayer 的单击 / 双击判定完全基于
+   <video> 上的 click 时间戳，因此播放暂停、双击全屏等行为保持不变。
+--------------------------------------------------------------------------- */
+.jf-player video {
+  pointer-events: none !important;
+}
+
+/* ---------------------------------------------------------------------------
+   横向手势必须留给播放器自己处理（滑动调进度）。
+
+   artplayer 给 .art-video-player 设的是 `touch-action: manipulation`，它**允许
+   横向 pan** —— 于是手指横向滑动时浏览器会认为用户在滚页面，抢走手势并派发
+   `pointercancel`，把手势层里正在进行的进度调节**掐断**（实测：seek 已经改了
+   currentTime，但指针被取消 → 状态被复位、时间提示浮层随之消失）。
+
+   改成 `pan-y`：纵向仍然交给浏览器滚页面（播放器竖屏只有 300px 高，
+   用户需要能在它上面上下滑动翻页），横向则不再被浏览器接管。
+--------------------------------------------------------------------------- */
+.jf-player,
+.jf-player .art-video-player {
+  touch-action: pan-y !important;
+}

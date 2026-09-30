@@ -61,6 +61,18 @@ const PLAYBACK_RATE_MAX = 4;
 const LONG_PRESS_RATE = 3;
 /** 长按判定时间（毫秒），超过该时长视为长按加速 */
 const LONG_PRESS_DELAY = 400;
+/**
+ * 手势死区（px）：按下后位移小于该值不算滑动。
+ *
+ * 存在的意义：长按加速只要求「按住不动」，而人手在按住时必然有 1~5px 抖动。
+ * artplayer 内置的横向滑动调进度**没有任何死区**，1px 位移就会按
+ * `duration × 位移比例 × 0.5` 跳进度（滑满一屏 = 总时长的一半），
+ * 于是长按会变成"一边加速一边疯狂 seek"，画面因此冻住。
+ * 这里自研手势层，用死区把这两种意图彻底分开。
+ */
+const SEEK_DEAD_ZONE = 12;
+/** 横向滑动满一个屏宽对应的进度比例（0.5 = 滑满一屏跳过总时长的一半） */
+const SEEK_FULL_SCREEN_RATIO = 0.5;
 
 /** 速率文案：1 倍速时显示「倍速」，其余显示具体数字（如 1.5x） */
 function formatPlaybackRateText(rate: number): string {
@@ -195,6 +207,8 @@ function PlayPageClient() {
   const longPressRateActiveRef = useRef(false);
   const longPressRateTimerRef = useRef<NodeJS.Timeout | null>(null);
   const suppressVideoClickRef = useRef(false);
+  // 横向滑动调进度时的时间提示（如 "12:34 / 45:00"）
+  const [seekHint, setSeekHint] = useState<string | null>(null);
 
   // 路线相关状态
   const [availableSources, setAvailableSources] = useState<SearchResult[]>([]);
@@ -2002,6 +2016,12 @@ function PlayPageClient() {
         hotkey: false,
         // 内置长按加速仅移动端生效且倍率不可配，这里关闭，改用统一的自定义实现（触摸 + 鼠标，固定 3 倍速）
         fastForward: false,
+        // 内置「横向滑动调进度」**没有任何死区**，实现是
+        // `当前时间 + duration × 位移比例 × TOUCH_MOVE_RATIO(0.5)` ——
+        // 滑满一个屏宽就要跳掉总时长的一半，长按时手指 1px 抖动都会持续 seek，
+        // 每次 seek 又会清空解码缓冲（画面冻住、松手才跳过去）。
+        // 关闭它，改用下面自研的手势层：带死区 + 与长按严格互斥。
+        gesture: false,
         autoOrientation: true,
         lock: true,
         moreVideoAttr: {
@@ -2442,7 +2462,26 @@ function PlayPageClient() {
   }, [loading, error]);
 
   // ---------------------------------------------------------------------------
-  // 长按画面 3 倍速播放（触摸 / 鼠标通用，主流播放器交互）
+  // 播放器手势层：长按 3 倍速 + 横向滑动调进度（两者严格互斥）
+  //
+  // 为什么不直接用 artplayer 内置的 `gesture`：
+  //   内置的横向滑动**没有死区**：进度 = 起点时间 + duration × 位移比例 × 0.5，
+  //   滑满一个屏宽就跳掉总时长的一半。而长按时人手必然有 1~5px 抖动，于是会变成
+  //   「一边 3 倍速、一边疯狂 seek」：每次 seek 都清空解码缓冲 →
+  //   画面固定不动 → 松手缓冲补齐后突然跳到新位置（就是"不丝滑"的成因）。
+  //   所以关掉内置 gesture（见 Artplayer 配置），这里实现带死区的版本。
+  //
+  // 互斥规则（对齐主流播放器）：
+  //   1. 按下后 400ms 内位移小于死区 → 判定长按 → 固定 3 倍速，此后忽略所有滑动；
+  //   2. 位移先越过死区且横向占优 → 判定滑动 → 取消长按，进入进度调节；
+  //   3. 纵向占优 → 取消长按，把事件让给页面滚动。
+  //
+  // 另：<video> 已在 globals.css 里让出指针事件（`pointer-events: none`）。
+  //   原因是 iOS 对 <video> 有原生长按行为（圆形放大镜 + 文字选择手柄），
+  //   CSS 的 `user-select: none` 压不住它（实测 video / .art-video-player /
+  //   .jf-player 计算值都已是 none 但仍会弹）。让事件落到外层 div 上即可规避。
+  //   artplayer 的单击/双击判定基于 <video> 的 click 时间戳（300ms 计数），
+  //   所以这里把 click 原样转发给 <video>，交互行为完全不变。
   // ---------------------------------------------------------------------------
   useEffect(() => {
     const container = artRef.current;
@@ -2478,11 +2517,27 @@ function PlayPageClient() {
       return stack.some(el => (el as Element).closest?.(CONTROL_SELECTOR));
     };
 
+    type GestureMode = 'idle' | 'pending' | 'longpress' | 'seek';
+    const g = {
+      pointerId: null as number | null,
+      startX: 0,
+      startY: 0,
+      baseTime: 0,
+      mode: 'idle' as GestureMode,
+    };
+
     const clearLongPressTimer = () => {
       if (longPressRateTimerRef.current) {
         clearTimeout(longPressRateTimerRef.current);
         longPressRateTimerRef.current = null;
       }
+    };
+
+    const resetGesture = () => {
+      clearLongPressTimer();
+      g.mode = 'idle';
+      g.pointerId = null;
+      setSeekHint(null);
     };
 
     const stopLongPressRace = () => {
@@ -2492,15 +2547,17 @@ function PlayPageClient() {
       longPressRateActiveRef.current = false;
       setIsLongPressRacing(false);
 
-      // 恢复到用户设定的倍速
-      const art = artPlayerRef.current;
-      if (art) {
-        try {
-          const video = art.video as HTMLVideoElement | undefined;
-          if (video) video.playbackRate = playbackRateRef.current;
-        } catch (_) {
-          // ignore
+      // 恢复用户设定的倍速，并还原音调补偿
+      try {
+        const video = artPlayerRef.current?.video as
+          | HTMLVideoElement
+          | undefined;
+        if (video) {
+          video.preservesPitch = true;
+          video.playbackRate = playbackRateRef.current;
         }
+      } catch (_) {
+        // ignore
       }
 
       // 长按结束浏览器仍可能补发 click，拦截一次避免误触播放/暂停
@@ -2512,58 +2569,158 @@ function PlayPageClient() {
 
     const handlePointerDown = (event: PointerEvent) => {
       if (event.pointerType === 'mouse' && event.button !== 0) return;
+      if (g.mode !== 'idle') return;
       if (!isRunning()) return;
 
-      // 落在控制栏 / 设置面板 / 进度条等控件上的按压不算长按加速
+      // 落在控制栏 / 设置面板 / 进度条等控件上的按压不算手势
       if (isOnControls(event.clientX, event.clientY)) return;
+
+      const video = artPlayerRef.current?.video as HTMLVideoElement | undefined;
+      g.pointerId = event.pointerId;
+      g.startX = event.clientX;
+      g.startY = event.clientY;
+      g.baseTime = video ? video.currentTime || 0 : 0;
+      g.mode = 'pending';
+
+      // 显式捕获指针：手指 / 鼠标移出播放器范围后仍能持续收到 move 与 up
+      try {
+        container.setPointerCapture(event.pointerId);
+      } catch (_) {
+        // ignore
+      }
 
       clearLongPressTimer();
       longPressRateTimerRef.current = setTimeout(() => {
-        if (longPressRateActiveRef.current) return;
-        if (!isRunning()) return;
+        if (g.mode !== 'pending') return;
+        if (!isRunning()) {
+          g.mode = 'idle';
+          return;
+        }
 
+        g.mode = 'longpress';
         longPressRateActiveRef.current = true;
         setIsLongPressRacing(true);
         try {
-          const video = artPlayerRef.current?.video as
+          const v = artPlayerRef.current?.video as
             | HTMLVideoElement
             | undefined;
-          if (video) video.playbackRate = LONG_PRESS_RATE;
+          if (v) {
+            // 关闭音调补偿：3 倍速下的音频时间拉伸很吃 CPU，移动端会因此掉帧
+            v.preservesPitch = false;
+            v.playbackRate = LONG_PRESS_RATE;
+          }
         } catch (_) {
           // ignore
         }
       }, LONG_PRESS_DELAY);
     };
 
-    const handlePointerEnd = () => {
-      stopLongPressRace();
+    const handlePointerMove = (event: PointerEvent) => {
+      if (g.pointerId === null || event.pointerId !== g.pointerId) return;
+      if (g.mode === 'idle' || g.mode === 'longpress') return;
+
+      const dx = event.clientX - g.startX;
+      const dy = event.clientY - g.startY;
+      const adx = Math.abs(dx);
+      const ady = Math.abs(dy);
+
+      // 还在死区内：两种意图都没成立，继续等
+      if (g.mode === 'pending') {
+        if (adx < SEEK_DEAD_ZONE && ady < SEEK_DEAD_ZONE) return;
+
+        clearLongPressTimer();
+        if (adx > ady) {
+          g.mode = 'seek';
+        } else {
+          // 纵向滑动：识别为滚动手势，整段放弃（长按与 seek 都不做）
+          resetGesture();
+          return;
+        }
+      }
+
+      if (g.mode !== 'seek') return;
+
+      const art = artPlayerRef.current;
+      const video = art?.video as HTMLVideoElement | undefined;
+      const duration = (art?.duration as number) || 0;
+      if (!art || !video || !duration) return;
+
+      const width = container.clientWidth || 1;
+      // 扣掉死区，避免刚越过阈值就跳一大截
+      const effective = dx - Math.sign(dx) * SEEK_DEAD_ZONE;
+      const target = Math.min(
+        Math.max(
+          g.baseTime + (effective / width) * duration * SEEK_FULL_SCREEN_RATIO,
+          0
+        ),
+        Math.max(duration - 1, 0)
+      );
+
+      try {
+        video.currentTime = target;
+      } catch (_) {
+        // ignore
+      }
+      setSeekHint(`${formatTime(target)} / ${formatTime(duration)}`);
     };
 
-    const handleClickCapture = (event: MouseEvent) => {
-      if (suppressVideoClickRef.current) {
-        event.stopPropagation();
-        event.preventDefault();
-        suppressVideoClickRef.current = false;
+    const handlePointerEnd = (event: PointerEvent) => {
+      if (g.pointerId === null || event.pointerId !== g.pointerId) return;
+      if (g.mode === 'longpress') {
+        stopLongPressRace();
       }
+      try {
+        container.releasePointerCapture(event.pointerId);
+      } catch (_) {
+        // ignore
+      }
+      resetGesture();
+    };
+
+    // <video> 让出指针事件后，点击落在外层容器上。
+    // artplayer 的单击 / 双击判定完全基于 <video> 的 click 时间戳，所以把 click 原样
+    // 转发给 <video>（并透传坐标），它的 300ms 双击识别、播放/暂停、双击全屏都照常工作。
+    const handleForwardClick = (event: MouseEvent) => {
+      if (suppressVideoClickRef.current) {
+        suppressVideoClickRef.current = false;
+        return;
+      }
+      if (event.button !== 0) return;
+      if (event.target && (event.target as Element).closest?.(CONTROL_SELECTOR)) {
+        return;
+      }
+
+      const video = artPlayerRef.current?.video as HTMLVideoElement | undefined;
+      if (!video) return;
+      video.dispatchEvent(
+        new MouseEvent('click', {
+          bubbles: true,
+          cancelable: true,
+          view: window,
+          clientX: event.clientX,
+          clientY: event.clientY,
+        })
+      );
     };
 
     container.addEventListener('pointerdown', handlePointerDown);
+    container.addEventListener('pointermove', handlePointerMove);
     container.addEventListener('pointerup', handlePointerEnd);
     container.addEventListener('pointercancel', handlePointerEnd);
-    container.addEventListener('pointerleave', handlePointerEnd);
-    container.addEventListener('click', handleClickCapture, true);
+    container.addEventListener('click', handleForwardClick);
 
     return () => {
       container.removeEventListener('pointerdown', handlePointerDown);
+      container.removeEventListener('pointermove', handlePointerMove);
       container.removeEventListener('pointerup', handlePointerEnd);
       container.removeEventListener('pointercancel', handlePointerEnd);
-      container.removeEventListener('pointerleave', handlePointerEnd);
-      container.removeEventListener('click', handleClickCapture, true);
+      container.removeEventListener('click', handleForwardClick);
       clearLongPressTimer();
       if (longPressRateActiveRef.current) {
         longPressRateActiveRef.current = false;
         setIsLongPressRacing(false);
       }
+      setSeekHint(null);
     };
   }, [loading, error]);
 
@@ -2838,6 +2995,20 @@ function PlayPageClient() {
                         {LONG_PRESS_RATE}x
                       </span>
                       <span className='text-sm opacity-90'>快进中</span>
+                    </div>
+                  </div>
+                )}
+
+                {/* 横向滑动调进度时的时间提示 */}
+                {seekHint && (
+                  <div
+                    data-jf-seek-hint='1'
+                    className='pointer-events-none absolute inset-x-0 top-1/2 z-30 flex -translate-y-1/2 justify-center'
+                  >
+                    <div className='animate-fade-in rounded-lg bg-black/70 px-4 py-2 text-white shadow-lg backdrop-blur-sm'>
+                      <span className='text-lg font-bold leading-none tabular-nums'>
+                        {seekHint}
+                      </span>
                     </div>
                   </div>
                 )}
