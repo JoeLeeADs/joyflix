@@ -270,6 +270,24 @@ export class DbManager {
     return {};
   }
 
+  // ---------- 用户全局设置（按用户维度的 KV） ----------
+  async getUserSetting(userName: string, key: string): Promise<string | null> {
+    if (typeof (this.storage as any).getUserSetting === 'function') {
+      return (this.storage as any).getUserSetting(userName, key);
+    }
+    return null;
+  }
+
+  async setUserSetting(
+    userName: string,
+    key: string,
+    value: string
+  ): Promise<void> {
+    if (typeof (this.storage as any).setUserSetting === 'function') {
+      await (this.storage as any).setUserSetting(userName, key, value);
+    }
+  }
+
   // ---------- 分布式锁（定时任务互斥） ----------
   // 后端未实现锁时返回 true（不阻塞任务）；localstorage 模式下定时任务本身是空操作
   async acquireLock(

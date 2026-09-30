@@ -16,9 +16,11 @@ import {
   getAllPlayRecords,
   getPlaybackRateConfig,
   getSkipConfig,
+  getUserSetting,
   savePlaybackRateConfig,
   savePlayRecord,
   saveSkipConfig,
+  setUserSetting,
   subscribeToDataUpdates,
 } from '@/lib/db.client';
 import { SearchResult } from '@/lib/types';
@@ -58,13 +60,14 @@ const PLAYBACK_RATE_OPTIONS = [2.0, 1.5, 1.25, 1.0, 0.75, 0.5];
 const PLAYBACK_RATE_MIN = 0.25;
 const PLAYBACK_RATE_MAX = 4;
 /**
- * 长按画面加速的倍率。
+ * 长按画面加速的可选倍率（播放页「设置 → 长按倍速」面板，按登录用户全局生效）。
  *
- * 取 2 而非 3：3 倍速下移动端的解码 + 音频时间拉伸压力明显上升，实测长按期间
+ * 默认 2 而非 3：3 倍速下移动端的解码 + 音频时间拉伸压力明显上升，实测长按期间
  * 画面发涩、掉帧（"不丝滑"）。2 倍速是 YouTube 等主流播放器的长按倍率，
- * 体感与流畅度更平衡 —— 长按是"临时代偿"，不需要 3 倍那么激进。
+ * 体感与流畅度更平衡 —— 长按是"临时代偿"，2x 已够快；想要更激进的可在设置里改。
  */
-const LONG_PRESS_RATE = 2;
+const LONG_PRESS_RATE_OPTIONS = [1.5, 2, 2.5, 3];
+const DEFAULT_LONG_PRESS_RATE = 2;
 /** 长按判定时间（毫秒），超过该时长视为长按加速 */
 const LONG_PRESS_DELAY = 400;
 /**
@@ -213,6 +216,18 @@ function PlayPageClient() {
   const longPressRateActiveRef = useRef(false);
   const longPressRateTimerRef = useRef<NodeJS.Timeout | null>(null);
   const suppressVideoClickRef = useRef(false);
+  // 长按倍速（用户全局设置）。ref 供手势层在触发时读取（闭包里的值会过期），
+  // state 供浮层文案渲染；两者经 applyLongPressRate 同步更新。
+  const [longPressRate, setLongPressRate] =
+    useState<number>(DEFAULT_LONG_PRESS_RATE);
+  const longPressRateRef = useRef<number>(DEFAULT_LONG_PRESS_RATE);
+  // 用户设置接口的返回时序可能晚于播放器创建（videoUrl 命中缓存时），
+  // 把 Promise 存起来，播放器创建时可以兜底等它，避免设置面板的初始 tooltip 摆错值
+  const longPressRatePromiseRef = useRef<Promise<number> | null>(null);
+  const applyLongPressRate = (rate: number) => {
+    longPressRateRef.current = rate;
+    setLongPressRate(rate);
+  };
   // 横向滑动调进度时的时间提示（如 "12:34 / 45:00"）
   const [seekHint, setSeekHint] = useState<string | null>(null);
 
@@ -256,6 +271,29 @@ function PlayPageClient() {
 
   const artPlayerRef = useRef<any>(null);
   const artRef = useRef<HTMLDivElement | null>(null);
+
+  // 「长按倍速」设置面板项 tooltip 的兜底补丁。
+  // 常规时序下用户设置接口先于播放器创建返回（tooltip 直接用 ref 值构造）；
+  // 若接口返回晚于播放器创建（videoUrl 命中缓存等），播放器已带着默认 tooltip
+  // 渲染完毕，这里按 DOM 文本定位该项并改写 tooltip。
+  // 不走 art.setting.update()：selector 项首渲染时被 defineProperty 写入只读属性，
+  // update 的「销毁重建」路径会抛 TypeError（与倍速控件注释中同源的坑）。
+  const patchLongPressSettingTooltip = (rate: number) => {
+    try {
+      const $settings = artRef.current?.querySelector('.art-settings');
+      $settings
+        ?.querySelectorAll('.art-setting-panel .art-setting-item')
+        .forEach(($item) => {
+          const left =
+            $item.querySelector('.art-setting-item-left')?.textContent || '';
+          if (!left.includes('长按倍速')) return;
+          const $tip = $item.querySelector('.art-setting-item-right-tooltip');
+          if ($tip) $tip.textContent = `${rate}x`;
+        });
+    } catch (_) {
+      // 设置面板未就绪时忽略
+    }
+  };
 
   // Wake Lock 相关
   const wakeLockRef = useRef<WakeLockSentinel | null>(null);
@@ -1940,6 +1978,34 @@ function PlayPageClient() {
     };
   }, [currentSource, currentId]);
 
+  // 读取用户全局的「长按倍速」设置（跨剧集、跨会话生效，存于 u:{用户}:setting:longPressRate）。
+  // 失败/未设置时保持默认值，不影响播放。Promise 存入 ref，供播放器创建时兜底等待，
+  // 避免设置面板的初始 tooltip 在「接口返回晚于播放器创建」的时序下显示错值。
+  useEffect(() => {
+    let cancelled = false;
+    const load = async (): Promise<number> => {
+      let rate = DEFAULT_LONG_PRESS_RATE;
+      try {
+        const v = await getUserSetting('longPressRate');
+        if (v) {
+          const n = Number(v);
+          if (LONG_PRESS_RATE_OPTIONS.includes(n)) rate = n;
+        }
+      } catch (_) {
+        // ignore：读不到就用默认值
+      }
+      if (cancelled) return rate;
+      applyLongPressRate(rate);
+      patchLongPressSettingTooltip(rate);
+      return rate;
+    };
+    longPressRatePromiseRef.current = load();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   useEffect(() => {
     if (
       !Artplayer ||
@@ -2044,7 +2110,7 @@ function PlayPageClient() {
         //    （`Artplayer.FAST_FORWARD_VALUE` 默认 3 / `FAST_FORWARD_TIME` 默认 1000，
         //      见官方「全局属性」文档），不是"不可配"。但上面 ①~③ 决定了它没法与
         //      "带死区的滑动 seek"共存，所以仍改用下面的自定义手势层
-        //      （触摸 + 鼠标统一，倍率 LONG_PRESS_RATE、延迟 LONG_PRESS_DELAY）。
+        //      （触摸 + 鼠标统一，倍率 longPressRateRef（用户可配）、延迟 LONG_PRESS_DELAY）。
         fastForward: false,
         // 内置「横向滑动调进度」**没有任何死区**，实现是
         // `当前时间 + duration × 位移比例 × TOUCH_MOVE_RATIO(0.5)` ——
@@ -2173,6 +2239,29 @@ function PlayPageClient() {
                 // ignore
               }
               return newVal ? '当前开启' : '当前关闭';
+            },
+          },
+          {
+            // 长按倍速（按登录用户全局生效，不区分剧集）。
+            // 初始 tooltip 用 ref 值构造 —— 挂载时的用户设置读取 effect 通常先于
+            // 播放器创建完成；万一接口返回更晚，patchLongPressSettingTooltip 会兜底改写。
+            name: '长按倍速',
+            html: '长按倍速',
+            tooltip: `${longPressRateRef.current}x`,
+            selector: LONG_PRESS_RATE_OPTIONS.map((r) => ({
+              html: `${r}x`,
+              name: `${r}x`,
+              value: r,
+              default: Math.abs(r - longPressRateRef.current) < 0.001,
+            })),
+            onSelect: function (item: { value: number }) {
+              const n = Number(item.value);
+              if (LONG_PRESS_RATE_OPTIONS.includes(n)) {
+                applyLongPressRate(n);
+                // 乐观写库；失败只打日志（setUserSetting 内部已 catch），下次打开仍是旧值
+                void setUserSetting('longPressRate', String(n));
+              }
+              return `${n}x`;
             },
           },
           {
@@ -2655,7 +2744,7 @@ function PlayPageClient() {
             //
             // 保持默认 true（音调不随倍速变化）。artplayer 官方 fastForward 同样不碰它。
             // 代价只是音频时间拉伸的一点开销，2 倍速下可忽略。
-            v.playbackRate = LONG_PRESS_RATE;
+            v.playbackRate = longPressRateRef.current;
           }
         } catch (_) {
           // ignore
@@ -3060,7 +3149,7 @@ function PlayPageClient() {
                         <path d='M17 5.5v13a1 1 0 0 0 2 0v-13a1 1 0 0 0-2 0z' />
                       </svg>
                       <span className='text-lg font-bold leading-none'>
-                        {LONG_PRESS_RATE}x
+                        {longPressRate}x
                       </span>
                       <span className='text-sm opacity-90'>快进中</span>
                     </div>

@@ -1959,3 +1959,70 @@ export async function deletePlaybackRateConfig(
     throw err;
   }
 }
+
+// ---------------- 用户全局设置（按登录用户维度的 KV，如长按倍速） ----------------
+
+const USER_SETTINGS_LOCAL_KEY = 'moontv_user_settings';
+
+/**
+ * 读取用户全局设置。没有记录时返回 null（调用方回退到默认值）。
+ * 服务端渲染阶段返回 null。
+ */
+export async function getUserSetting(key: string): Promise<string | null> {
+  if (typeof window === 'undefined') return null;
+
+  // 数据库存储模式（redis / upstash）：从服务端读取
+  if (STORAGE_TYPE !== 'localstorage') {
+    try {
+      const res = await fetchFromApi<{ key: string; value: string | null }>(
+        `/api/usersettings?key=${encodeURIComponent(key)}`
+      );
+      return res.value ?? null;
+    } catch (err) {
+      console.error('获取用户设置失败:', err);
+      return null;
+    }
+  }
+
+  // localStorage 模式
+  try {
+    const raw = localStorage.getItem(USER_SETTINGS_LOCAL_KEY);
+    if (!raw) return null;
+    const settings = JSON.parse(raw) as Record<string, string>;
+    return settings[key] ?? null;
+  } catch (err) {
+    console.error('读取用户设置失败:', err);
+    return null;
+  }
+}
+
+/**
+ * 保存用户全局设置。数据库模式下异步落库；localStorage 模式直接写本地。
+ */
+export async function setUserSetting(key: string, value: string): Promise<void> {
+  if (typeof window === 'undefined') return;
+
+  if (STORAGE_TYPE !== 'localstorage') {
+    try {
+      await fetchWithAuth('/api/usersettings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key, value }),
+      });
+    } catch (err) {
+      console.error('保存用户设置失败:', err);
+    }
+    return;
+  }
+
+  try {
+    const raw = localStorage.getItem(USER_SETTINGS_LOCAL_KEY);
+    const settings = raw
+      ? (JSON.parse(raw) as Record<string, string>)
+      : {};
+    settings[key] = value;
+    localStorage.setItem(USER_SETTINGS_LOCAL_KEY, JSON.stringify(settings));
+  } catch (err) {
+    console.error('保存用户设置失败:', err);
+  }
+}

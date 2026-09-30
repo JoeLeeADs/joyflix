@@ -448,6 +448,28 @@ export class RedisStorage implements IStorage {
     return configs;
   }
 
+  // ---------- 用户全局设置（按用户维度的 KV） ----------
+  private settingKey(user: string, key: string) {
+    return `u:${user}:setting:${key}`;
+  }
+
+  async getUserSetting(userName: string, key: string): Promise<string | null> {
+    const val = await withRetry(() =>
+      this.client.get(this.settingKey(userName, key))
+    );
+    return val ?? null;
+  }
+
+  async setUserSetting(
+    userName: string,
+    key: string,
+    value: string
+  ): Promise<void> {
+    await withRetry(() =>
+      this.client.set(this.settingKey(userName, key), value)
+    );
+  }
+
   // ---------- 分布式锁（定时任务互斥） ----------
   async acquireLock(
     key: string,

@@ -102,6 +102,10 @@ export interface IStorage {
     userName: string
   ): Promise<{ [key: string]: PlaybackRateConfig }>;
 
+  // 用户全局设置（按用户维度存储的 KV，如长按倍速等播放偏好）
+  getUserSetting(userName: string, key: string): Promise<string | null>;
+  setUserSetting(userName: string, key: string, value: string): Promise<void>;
+
   // 分布式锁（可选实现，用于定时任务互斥）
   // 原子占锁：成功返回 true，锁已被他人持有返回 false
   acquireLock?(
