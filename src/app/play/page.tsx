@@ -2227,16 +2227,12 @@ function PlayPageClient() {
       artPlayerRef.current.on('video:volumechange', () => {
         lastVolumeRef.current = artPlayerRef.current.volume;
       });
-      artPlayerRef.current.on('video:ratechange', () => {
-        const rate = artPlayerRef.current?.playbackRate ?? 1;
-        // 长按加速期间产生的速率变化属于临时状态，不作为用户偏好记录
-        if (longPressRateActiveRef.current) return;
-        // 播放器被重置为 1x 或通过其它入口改变速率时，回写到用户偏好
-        if (Math.abs(rate - playbackRateRef.current) > 0.001) {
-          applyUserPlaybackRate(rate);
-          applyPlaybackRateToPlayer(rate);
-        }
-      });
+
+      // 注意：这里**不要**监听 video:ratechange 去"学习"用户偏好。
+      // 切集 / 换源时 artplayer 会重新加载媒体，浏览器把 playbackRate 重置为
+      // defaultPlaybackRate（1.0）并触发 ratechange —— 如果把这个重置当成用户意图，
+      // 会把用户设定的倍速覆盖成 1，表现为"切下一集后倍速丢了"。
+      // 用户的速率入口只有控制栏选择器（onSelect）与本地恢复，均已显式处理。
 
       // 监听视频可播放事件，这时恢复播放进度更可靠
       artPlayerRef.current.on('video:canplay', () => {
@@ -2262,8 +2258,11 @@ function PlayPageClient() {
           ) {
             artPlayerRef.current.volume = lastVolumeRef.current;
           }
-          // 保持用户设定的倍速：无论 WebKit 还是其他内核，切集/换源后都恢复
+          // 保持用户设定的倍速：无论 WebKit 还是其他内核，切集/换源后都恢复。
+          // 但**长按加速期间要跳过** —— hls 缓冲波动会让 canplay 反复触发，
+          // 若不跳过就会把长按中的 3x 又拽回用户倍速。
           if (
+            !longPressRateActiveRef.current &&
             Math.abs(
               artPlayerRef.current.playbackRate - playbackRateRef.current
             ) > 0.001
@@ -2374,19 +2373,35 @@ function PlayPageClient() {
     const container = artRef.current;
     if (!container) return;
 
-    // 控制栏 / 设置面板 / 通知等交互区域内的按压不视为长按加速
-    const INTERACTIVE_SELECTOR = [
-      '.art-bottom',
-      '.art-controls',
-      '.art-progress',
-      '.art-settings',
-      '.art-contextmenus',
-      '.art-notice',
-      '.art-mask',
-      '.art-volume-panel',
-      '.art-loading',
-      '.art-auto-playback-last',
-    ].join(', ');
+    // 长按加速是否可用。
+    // 注意：不能直接用 `art.playing` —— 它的实现是
+    // `!video.paused && video.readyState > 2 && !video.ended`，
+    // 缓冲不足时 readyState 会掉到 HAVE_FUTURE_DATA 以下，`playing` 瞬时变 false，
+    // 表现为"同一个长按操作有时生效、有时没反应"（弱网下尤甚）。
+    // 这里只要求「未暂停且未结束」，与画面是否刚好缓冲完无关。
+    const isRunning = () => {
+      const art = artPlayerRef.current;
+      const video = art?.video as HTMLVideoElement | undefined;
+      if (!art || !video) return false;
+      if (art.isLock) return false;
+      return !video.paused && !video.ended;
+    };
+
+    // 判断按压点是否落在播放器控件上。
+    //
+    // 为什么不用 `event.target.closest(...)`：artplayer 的 `.art-bottom` 是一个
+    // 覆盖整个播放器区域的绝对定位容器（实测 rect ≈ 整个播放器），按 DOM 层级判断会
+    // 把「画面正中央」也误判成控制栏；而按坐标比较矩形同样会被这个全屏容器带偏。
+    //
+    // `document.elementsFromPoint` 会**忽略 `pointer-events: none` 的层**，
+    // 返回的正是用户实际"点到"的元素栈，因此能准确区分「点在画面上」与「点在控件上」。
+    const CONTROL_SELECTOR =
+      '.art-controls, .art-progress, .art-settings, .art-contextmenus, .art-volume-panel, .art-notice, .art-auto-playback-last';
+
+    const isOnControls = (x: number, y: number) => {
+      const stack = document.elementsFromPoint(x, y);
+      return stack.some(el => (el as Element).closest?.(CONTROL_SELECTOR));
+    };
 
     const clearLongPressTimer = () => {
       if (longPressRateTimerRef.current) {
@@ -2422,23 +2437,22 @@ function PlayPageClient() {
 
     const handlePointerDown = (event: PointerEvent) => {
       if (event.pointerType === 'mouse' && event.button !== 0) return;
+      if (!isRunning()) return;
 
-      const art = artPlayerRef.current;
-      if (!art || !art.playing || art.isLock) return;
-
-      const target = event.target as Element | null;
-      if (target?.closest(INTERACTIVE_SELECTOR)) return;
+      // 落在控制栏 / 设置面板 / 进度条等控件上的按压不算长按加速
+      if (isOnControls(event.clientX, event.clientY)) return;
 
       clearLongPressTimer();
       longPressRateTimerRef.current = setTimeout(() => {
-        const current = artPlayerRef.current;
-        if (!current || longPressRateActiveRef.current) return;
-        if (!current.playing) return;
+        if (longPressRateActiveRef.current) return;
+        if (!isRunning()) return;
 
         longPressRateActiveRef.current = true;
         setIsLongPressRacing(true);
         try {
-          const video = current.video as HTMLVideoElement | undefined;
+          const video = artPlayerRef.current?.video as
+            | HTMLVideoElement
+            | undefined;
           if (video) video.playbackRate = LONG_PRESS_RATE;
         } catch (_) {
           // ignore

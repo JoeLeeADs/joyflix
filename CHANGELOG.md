@@ -53,6 +53,22 @@
   现改为直接更新文案节点 `.art-selector-value` 的 `innerHTML`，并手动维护
   `.art-selector-item.art-current` 高亮，**不再触发控件重建**。
 
+- **长按加速偶发不生效** `src/app/play/page.tsx`
+
+  原先用 `art.playing` 判断「是否正在播放」，而它的实现是
+  `!video.paused && video.readyState > 2 && !video.ended` —— 缓冲不足时 `readyState`
+  会掉到 `HAVE_FUTURE_DATA` 以下，`playing` 瞬时变 `false`，于是同一个长按动作
+  **有时生效、有时毫无反应**（弱网 / 起播缓冲期最明显）。改为只判断「未暂停且未结束」，
+  与缓冲状态解耦。
+
+- **切下一集后倍速被重置为 1x** `src/app/play/page.tsx`
+
+  原先监听 `video:ratechange` 把速率变化回写成用户偏好。但切集 / 换源时 artplayer 会重新
+  加载媒体，浏览器把 `playbackRate` 重置为 `defaultPlaybackRate`（1.0）并触发 `ratechange`
+  —— 这个**程序性重置被当成了用户意图**，把用户设定覆盖成 1x，连 `localStorage` 也一并改写，
+  表现为「切集后倍速丢了，重进页面也是 1x」。现移除该自动学习逻辑：用户速率的入口只有
+  控制栏选择器与本地恢复，两者均已显式处理。
+
 ## [0.2.5] - 2026-09-29
 
 ### 修复
