@@ -57,8 +57,14 @@ const PLAYBACK_RATE_OPTIONS = [2.0, 1.5, 1.25, 1.0, 0.75, 0.5];
 /** 允许区间（容错：数据库里可能存了非预设的合法值） */
 const PLAYBACK_RATE_MIN = 0.25;
 const PLAYBACK_RATE_MAX = 4;
-/** 长按画面加速的倍率（主流播放器惯例） */
-const LONG_PRESS_RATE = 3;
+/**
+ * 长按画面加速的倍率。
+ *
+ * 取 2 而非 3：3 倍速下移动端的解码 + 音频时间拉伸压力明显上升，实测长按期间
+ * 画面发涩、掉帧（"不丝滑"）。2 倍速是 YouTube 等主流播放器的长按倍率，
+ * 体感与流畅度更平衡 —— 长按是"临时代偿"，不需要 3 倍那么激进。
+ */
+const LONG_PRESS_RATE = 2;
 /** 长按判定时间（毫秒），超过该时长视为长按加速 */
 const LONG_PRESS_DELAY = 400;
 /**
@@ -202,7 +208,7 @@ function PlayPageClient() {
   const lastVolumeRef = useRef<number>(1.0);
   // 用户设定的播放速率（倍速），默认 1.0
   const playbackRateRef = useRef<number>(1.0);
-  // 长按画面 3 倍速播放相关
+  // 长按画面加速播放相关
   const [isLongPressRacing, setIsLongPressRacing] = useState(false);
   const longPressRateActiveRef = useRef(false);
   const longPressRateTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -1567,6 +1573,19 @@ function PlayPageClient() {
     if (longPressRateActiveRef.current) {
       longPressRateActiveRef.current = false;
       setIsLongPressRacing(false);
+      // 立即把倍速还给用户设定值。
+      // 这里以前是漏的：切集/换源只重置了标志位，把"恢复倍速"全押在 canplay 兜底上，
+      // 而那段兜底恰好要求 `longPressRateActiveRef` 已经为 false —— 隐含依赖了本处赋值。
+      // 在此直接恢复，避免"切集瞬间仍停留在长按倍速"的听感突变。
+      // （不再需要恢复 preservesPitch：全程不碰它）
+      try {
+        const video = artPlayerRef.current?.video as
+          | HTMLVideoElement
+          | undefined;
+        if (video) video.playbackRate = playbackRateRef.current;
+      } catch (_) {
+        // ignore
+      }
     }
   };
 
@@ -2014,7 +2033,18 @@ function PlayPageClient() {
         theme: '#60a5fa',
         lang: 'zh-cn',
         hotkey: false,
-        // 内置长按加速仅移动端生效且倍率不可配，这里关闭，改用统一的自定义实现（触摸 + 鼠标，固定 3 倍速）
+        // 内置长按加速（fastForward）关闭，理由有三（结论来自读 artplayer 5.3.0 源码）：
+        //   ① 它把 touchstart 绑在 **<video>** 上。而我们已经让 <video> 让出指针事件
+        //      （pointer-events:none，用于规避 iOS 对 <video> 的原生长按放大镜）→
+        //      监听器根本收不到事件；
+        //   ② 它的取消条件是 document 上的**任意** touchmove，**没有任何死区** ——
+        //      长按时手指 1~5px 的自然抖动会立刻取消加速，正是要根除的"按住时快时停"；
+        //   ③ 只处理 touch 事件（鼠标/触控板用不了），且仅移动端生效。
+        // ⚠️ 补充一个容易误判的点：它的**倍率与延迟其实是可配的**
+        //    （`Artplayer.FAST_FORWARD_VALUE` 默认 3 / `FAST_FORWARD_TIME` 默认 1000，
+        //      见官方「全局属性」文档），不是"不可配"。但上面 ①~③ 决定了它没法与
+        //      "带死区的滑动 seek"共存，所以仍改用下面的自定义手势层
+        //      （触摸 + 鼠标统一，倍率 LONG_PRESS_RATE、延迟 LONG_PRESS_DELAY）。
         fastForward: false,
         // 内置「横向滑动调进度」**没有任何死区**，实现是
         // `当前时间 + duration × 位移比例 × TOUCH_MOVE_RATIO(0.5)` ——
@@ -2325,7 +2355,7 @@ function PlayPageClient() {
           }
           // 保持用户设定的倍速：无论 WebKit 还是其他内核，切集/换源后都恢复。
           // 但**长按加速期间要跳过** —— hls 缓冲波动会让 canplay 反复触发，
-          // 若不跳过就会把长按中的 3x 又拽回用户倍速。
+          // 若不跳过就会把长按中的倍速又拽回用户设定值。
           if (
             !longPressRateActiveRef.current &&
             Math.abs(
@@ -2462,17 +2492,18 @@ function PlayPageClient() {
   }, [loading, error]);
 
   // ---------------------------------------------------------------------------
-  // 播放器手势层：长按 3 倍速 + 横向滑动调进度（两者严格互斥）
+  // 播放器手势层：长按加速 + 横向滑动调进度（两者严格互斥）
   //
   // 为什么不直接用 artplayer 内置的 `gesture`：
   //   内置的横向滑动**没有死区**：进度 = 起点时间 + duration × 位移比例 × 0.5，
   //   滑满一个屏宽就跳掉总时长的一半。而长按时人手必然有 1~5px 抖动，于是会变成
-  //   「一边 3 倍速、一边疯狂 seek」：每次 seek 都清空解码缓冲 →
+  //   「一边加速、一边疯狂 seek」：每次 seek 都清空解码缓冲 →
   //   画面固定不动 → 松手缓冲补齐后突然跳到新位置（就是"不丝滑"的成因）。
   //   所以关掉内置 gesture（见 Artplayer 配置），这里实现带死区的版本。
   //
   // 互斥规则（对齐主流播放器）：
-  //   1. 按下后 400ms 内位移小于死区 → 判定长按 → 固定 3 倍速，此后忽略所有滑动；
+  //   1. 按下后 400ms 内位移小于死区 → 判定长按 → 固定 LONG_PRESS_RATE 倍速，
+  //      此后忽略所有滑动；
   //   2. 位移先越过死区且横向占优 → 判定滑动 → 取消长按，进入进度调节；
   //   3. 纵向占优 → 取消长按，把事件让给页面滚动。
   //
@@ -2547,13 +2578,14 @@ function PlayPageClient() {
       longPressRateActiveRef.current = false;
       setIsLongPressRacing(false);
 
-      // 恢复用户设定的倍速，并还原音调补偿
+      // 恢复用户设定的倍速。
+      // （音调补偿全程保持开启、从未被改动，所以这里不需要"还原"它，
+      //   见长按触发处关于 preservesPitch 的说明）
       try {
         const video = artPlayerRef.current?.video as
           | HTMLVideoElement
           | undefined;
         if (video) {
-          video.preservesPitch = true;
           video.playbackRate = playbackRateRef.current;
         }
       } catch (_) {
@@ -2576,6 +2608,11 @@ function PlayPageClient() {
       if (isOnControls(event.clientX, event.clientY)) return;
 
       const video = artPlayerRef.current?.video as HTMLVideoElement | undefined;
+      // 幂等自愈：每次按下都把"音调补偿"拨回开启。
+      // `preservesPitch` 是挂在 <video> 元素上的持久状态，一旦残留为 false 会持续变调，
+      // 且不依赖任何时序就能修好 —— 详见长按触发处的说明。代价可忽略。
+      if (video) video.preservesPitch = true;
+
       g.pointerId = event.pointerId;
       g.startX = event.clientX;
       g.startY = event.clientY;
@@ -2605,8 +2642,19 @@ function PlayPageClient() {
             | HTMLVideoElement
             | undefined;
           if (v) {
-            // 关闭音调补偿：3 倍速下的音频时间拉伸很吃 CPU，移动端会因此掉帧
-            v.preservesPitch = false;
+            // ⚠️ 只动 playbackRate，**绝不动 preservesPitch**。
+            //
+            // 曾经为了"省 CPU"在这里设 `v.preservesPitch = false`，结果是两个 bug：
+            //   ① 音调随倍速一起升高 —— 听感就是"声音变尖锐"（用户实际报过）；
+            //   ② 它是挂在 <video> 元素上的**持久状态**，而恢复路径有多条
+            //      （正常松手 / 切集时 resetLongPressRaceState / 手势 effect 重绑）。
+            //      只要有一条被跳过（指针被 pointercancel 掐断、播放器重载导致
+            //      effect 重绑后 g.pointerId 已对不上，指针 up 被提前 return），
+            //      它就会**残留 false**，之后一直变调 —— 直到下一次长按正常松手
+            //      才被"顺带"改回 true，表现正是"声音变尖，再长按一次就正常了"。
+            //
+            // 保持默认 true（音调不随倍速变化）。artplayer 官方 fastForward 同样不碰它。
+            // 代价只是音频时间拉伸的一点开销，2 倍速下可忽略。
             v.playbackRate = LONG_PRESS_RATE;
           }
         } catch (_) {
@@ -2990,10 +3038,17 @@ function PlayPageClient() {
                   }}
                 ></div>
 
-                {/* 长按画面 3 倍速播放提示 */}
+                {/* 长按画面加速播放提示 */}
                 {isLongPressRacing && (
                   <div className='pointer-events-none absolute inset-0 z-30 flex items-center justify-center'>
-                    <div className='animate-fade-in flex items-center gap-2 rounded-full bg-black/70 px-5 py-2.5 text-white shadow-lg backdrop-blur-sm'>
+                    {/*
+                      ⚠️ 这里刻意**不用** `backdrop-blur-*`：
+                      backdrop-filter 会让浏览器每帧对下层（正在播放的视频）重新做一次
+                      模糊合成，移动端 GPU 压力极大 —— 长按瞬间叠上这层模糊，
+                      画面就会明显发涩、掉帧（用户报的"长按时不丝滑"）。
+                      改用高不透明度纯色背景，观感几乎一致但没有逐帧合成开销。
+                    */}
+                    <div className='animate-fade-in flex items-center gap-2 rounded-full bg-black/85 px-5 py-2.5 text-white shadow-lg'>
                       <svg
                         width='20'
                         height='20'
@@ -3018,7 +3073,8 @@ function PlayPageClient() {
                     data-jf-seek-hint='1'
                     className='pointer-events-none absolute inset-x-0 top-1/2 z-30 flex -translate-y-1/2 justify-center'
                   >
-                    <div className='animate-fade-in rounded-lg bg-black/70 px-4 py-2 text-white shadow-lg backdrop-blur-sm'>
+                    {/* 同上：不用 backdrop-blur，避免滑动时逐帧模糊合成拖慢视频 */}
+                    <div className='animate-fade-in rounded-lg bg-black/85 px-4 py-2 text-white shadow-lg'>
                       <span className='text-lg font-bold leading-none tabular-nums'>
                         {seekHint}
                       </span>

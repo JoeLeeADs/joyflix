@@ -13,6 +13,51 @@
   29 个 API 路由中有 18 个缺少自建鉴权、`/api/image-proxy` 与 `/api/admin/test-proxy` 存在 SSRF、
   以及 `Dockerfile` 依赖 `sed` 改写源码且失配时不报错。
 
+## [0.2.11] - 2026-09-30
+
+真机反馈（iOS Safari）跟进 0.2.9 / 0.2.10 的长按加速：**放大镜已消除** ✅，
+但暴露两个新问题 —— **长按后声音变尖锐（有时要再按一次才恢复）**、**长按期间画面仍不丝滑**。
+本版修掉这两个问题，并把长按倍率从 3 倍降为 2 倍。
+
+### 修复
+
+- **长按后声音变尖锐，有时要再长按一次才恢复正常** `src/app/play/page.tsx`
+  *现象*：长按加速结束后音调持续偏高（听感"声音变尖"），重新长按一次又恢复正常。
+  *原因*：0.2.9 在长按触发时设了 `video.preservesPitch = false`（当时的理由是
+  "3 倍速下音频时间拉伸吃 CPU"）。但 `preservesPitch` 是**挂在 `<video>` 元素上的持久状态**，
+  而恢复它的路径有多条：正常松手走 `stopLongPressRace()`、切集走 `resetLongPressRaceState()`、
+  播放器重载走手势 effect 的清理。其中 `resetLongPressRaceState()` **只重置标志位，
+  既不恢复 `preservesPitch` 也不恢复 `playbackRate`**；手势 effect 的清理同样只改 ref。
+  于是只要有一条路径被跳过（指针被 `pointercancel` 掐断、播放器重载使 effect 重绑后
+  `g.pointerId` 已对不上、`pointerUp` 被提前 return），`preservesPitch` 就会**残留为 false**，
+  此后一直变调 —— 直到下一次长按正常松手，才被 `stopLongPressRace()` 里的
+  `preservesPitch = true` "顺带"修好。这就是"再按一下就好了"的机制。
+  *修复*：**彻底不再改动 `preservesPitch`**，保持浏览器默认（`true`，音调不随倍速变化）——
+  与 artplayer 官方 `fastForward` 的做法一致（其源码中完全没有 pitch 处理）。
+  另在指针按下时做一次幂等的 `preservesPitch = true` 自愈，兜住任何潜在残留。
+
+- **长按期间画面仍不丝滑** `src/app/play/page.tsx`
+  *原因一*：3 倍速对移动端的解码 + 音频时间拉伸压力偏高。
+  *原因二*：长按提示浮层用了 `backdrop-blur-sm`（即 `backdrop-filter: blur()`）——
+  它会强制浏览器**每帧对下层正在播放的视频重新做一次模糊合成**，移动端 GPU 开销很大，
+  浮层一出现画面就明显发涩。
+  *修复*：长按倍率 `3 → 2`（与 YouTube 等主流播放器一致；长按是"临时代偿"，无需 3 倍那么激进）；
+  长按提示浮层与滑动时间提示浮层**去掉 `backdrop-blur`**，改用高不透明度纯色背景（`bg-black/85`），
+  观感几乎一致但消除了逐帧合成开销。
+
+- **切集/换源瞬间可能停留在长按倍速** `src/app/play/page.tsx`
+  `resetLongPressRaceState()` 在重置标志位后**立即把 `playbackRate` 还给用户设定值**。
+  此前该函数只重置标志位，把"恢复倍速"全押在 `canplay` 兜底上，而那段兜底恰好要求
+  `longPressRateActiveRef` 已为 false —— 隐含依赖了本处赋值，顺序脆弱。现在改为显式恢复。
+
+### 说明
+
+- 关于"换成成熟的长按方案"：artplayer 内置 `fastForward` 的倍率与延迟**其实是可配的**
+  （`Artplayer.FAST_FORWARD_VALUE` 默认 3、`FAST_FORWARD_TIME` 默认 1000），但源码显示它
+  ① 把 `touchstart` 绑在 `<video>` 上（而本项目已让 `<video>` 让出指针事件以规避 iOS 放大镜）→ 收不到事件；
+  ② 取消条件是 document 上**任意** `touchmove`，**没有死区** → 长按时手指抖动会立刻取消加速；
+  ③ 只处理 touch、仅移动端生效。故仍保留自定义手势层，细节见代码注释。
+
 ## [0.2.10] - 2026-09-30
 
 0.2.9 上线后，用真浏览器专项诊断（`diagnose-click-forward.js`）复测"轻点画面"链路时，
