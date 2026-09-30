@@ -55,6 +55,21 @@
   单次任务一旦超过调度周期也不会叠加堆积；同一进程内绝不并发。
   这层与上面的分布式锁是**双保险**（前者防同进程，后者防多实例 / 手动触发）。
 
+### 备注
+
+- **手动触发请用容器内直连，不要走公网入口**。站点经 Cloudflare Tunnel 暴露，
+  Cloudflare 对代理请求的等待上限约 100 秒，而一次完整刷新要 2~4 分钟，
+  因此从公网 `curl https://<域名>/api/cron?token=...` 会在约 138 秒后收到
+  **HTTP 524**（Cloudflare 的错误页），但**服务端任务仍在正常执行并跑完**。
+  容器内 `start.js` 走的是 `http://0.0.0.0:3000`，不受该限制，能正常拿到结果。
+  需要手动触发时请用容器内直连——**注意必须写 `127.0.0.1`**：
+  `docker exec joyflix-core wget -qO- --header="x-cron-token: $CRON_TOKEN" http://127.0.0.1:3000/api/cron`。
+  写成 `localhost` 会 `Connection refused`：容器内 `/etc/hosts` 里 `localhost` 解析为 IPv6 `::1`，
+  而 Next.js 只监听 IPv4。容器内没有 `curl`，用 `wget`（已实测 401 / 200 两种返回均正常）。
+- 锁的键名是 `joyflix:cron:lock`（冒号，不是下划线），排查时用
+  `docker exec joyflix-redis redis-cli GET "joyflix:cron:lock"` 查看，
+  `TTL` 可看出已运行多久（初始 1800 秒）。
+
 ## [0.2.6] - 2026-09-30
 
 ### 新增
