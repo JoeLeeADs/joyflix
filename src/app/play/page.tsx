@@ -45,7 +45,23 @@ interface PlaybackRateSelector {
   html: string;
 }
 
+// -----------------------------------------------------------------------------
+// 播放速率（倍速）相关常量
+// 说明：定义在模块级，保证跨渲染引用稳定，供播放器事件回调安全使用
+// -----------------------------------------------------------------------------
+/** 可选播放速率 */
+const PLAYBACK_RATE_OPTIONS = [2.0, 1.5, 1.25, 1.0, 0.75, 0.5];
+/** 播放速率本地持久化 key（跨集数、跨会话保持） */
+const PLAYBACK_RATE_STORAGE_KEY = 'joyflix_playback_rate';
+/** 长按画面加速的倍率（主流播放器惯例） */
+const LONG_PRESS_RATE = 3;
+/** 长按判定时间（毫秒），超过该时长视为长按加速 */
+const LONG_PRESS_DELAY = 400;
 
+/** 速率文案：1 倍速时显示「倍速」，其余显示具体数字（如 1.5x） */
+function formatPlaybackRateText(rate: number): string {
+  return Math.abs(rate - 1) < 0.001 ? '倍速' : `${rate}x`;
+}
 
 function PlayPageClient() {
   const router = useRouter();
@@ -161,8 +177,13 @@ function PlayPageClient() {
   const resumeTimeRef = useRef<number | null>(null);
   // 上次使用的音量，默认 1.0
   const lastVolumeRef = useRef<number>(1.0);
-  // 上次使用的播放速率，默认 1.0
-  const lastPlaybackRateRef = useRef<number>(1.0);
+  // 用户设定的播放速率（倍速），默认 1.0
+  const playbackRateRef = useRef<number>(1.0);
+  // 长按画面 3 倍速播放相关
+  const [isLongPressRacing, setIsLongPressRacing] = useState(false);
+  const longPressRateActiveRef = useRef(false);
+  const longPressRateTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const suppressVideoClickRef = useRef(false);
 
   // 路线相关状态
   const [availableSources, setAvailableSources] = useState<SearchResult[]>([]);
@@ -1497,6 +1518,18 @@ function PlayPageClient() {
   // ---------------------------------------------------------------------------
   // 集数切换
   // ---------------------------------------------------------------------------
+  // 重置长按加速状态（切集 / 换源 / 卸载时调用）
+  const resetLongPressRaceState = () => {
+    if (longPressRateTimerRef.current) {
+      clearTimeout(longPressRateTimerRef.current);
+      longPressRateTimerRef.current = null;
+    }
+    if (longPressRateActiveRef.current) {
+      longPressRateActiveRef.current = false;
+      setIsLongPressRacing(false);
+    }
+  };
+
   // 处理集数切换
   const handleEpisodeChange = (episodeNumber: number) => {
     setLongPressedTitle(null);
@@ -1509,6 +1542,8 @@ function PlayPageClient() {
       clearTimeout(fadeOutTimerRef.current);
       fadeOutTimerRef.current = null;
     }
+    // 清掉可能残留的长按加速状态
+    resetLongPressRaceState();
 
     if (episodeNumber >= 0 && episodeNumber < totalEpisodes) {
       // 在更换集数前保存当前播放进度
@@ -1754,13 +1789,60 @@ function PlayPageClient() {
   
 
   function getPlaybackRateSelector(): PlaybackRateSelector[] {
-    const rates = [2.0, 1.5, 1.25, 1.0, 0.75, 0.5];
-    return rates.map(rate => ({
+    return PLAYBACK_RATE_OPTIONS.map(rate => ({
       name: `${rate}x`,
       value: rate,
       html: `${rate}x`
     }));
   }
+
+  // 记录用户设定的倍速，并持久化到本地（跳集 / 重进页面都能保持）
+  const applyUserPlaybackRate = (rate: number) => {
+    playbackRateRef.current = rate;
+    try {
+      localStorage.setItem(PLAYBACK_RATE_STORAGE_KEY, String(rate));
+    } catch (_) {
+      // 忽略隐私模式等写入失败
+    }
+  };
+
+  // 将倍速写入播放器，并同步控制栏上的倍速文案
+  const applyPlaybackRateToPlayer = (rate: number) => {
+    const art = artPlayerRef.current;
+    if (!art) return;
+    try {
+      const video = art.video as HTMLVideoElement | undefined;
+      if (video && Math.abs(video.playbackRate - rate) > 0.001) {
+        // 直接操作 video，避免 artplayer 弹出 "Rate: x" 的 notice 干扰
+        video.playbackRate = rate;
+      }
+    } catch (_) {
+      // ignore
+    }
+    try {
+      art.controls.update({
+        name: 'playback-rate',
+        html: `<b>${formatPlaybackRateText(rate)}</b>`,
+      });
+    } catch (_) {
+      // 控制栏尚未就绪时忽略
+    }
+  };
+
+  // 组件挂载后：从本地存储恢复用户上次设定的倍速
+  useEffect(() => {
+    let restored = 1.0;
+    try {
+      const raw = localStorage.getItem(PLAYBACK_RATE_STORAGE_KEY);
+      const parsed = raw ? Number.parseFloat(raw) : NaN;
+      if (PLAYBACK_RATE_OPTIONS.includes(parsed)) {
+        restored = parsed;
+      }
+    } catch (_) {
+      // ignore
+    }
+    playbackRateRef.current = restored;
+  }, []);
 
   useEffect(() => {
     if (
@@ -1798,6 +1880,8 @@ function PlayPageClient() {
 
     // 非WebKit浏览器且播放器已存在，使用switch方法切换
     if (!isWebkit && artPlayerRef.current) {
+      // 切换前重置长按加速状态，避免状态残留
+      resetLongPressRaceState();
       artPlayerRef.current.switch = videoUrl;
       artPlayerRef.current.title = `${videoTitle} - 第${
         currentEpisodeIndex + 1
@@ -1808,6 +1892,8 @@ function PlayPageClient() {
           videoUrl
         );
       }
+      // 保持用户设定的倍速与文案（switch 完成后的 canplay 会再次校正）
+      applyPlaybackRateToPlayer(playbackRateRef.current);
       return;
     }
 
@@ -1815,6 +1901,8 @@ function PlayPageClient() {
     if (artPlayerRef.current) {
       cleanupPlayer();
     }
+    // 重建播放器时同样重置长按加速状态
+    resetLongPressRaceState();
 
     try {
       // 创建新的播放器实例
@@ -1849,7 +1937,8 @@ function PlayPageClient() {
         theme: '#60a5fa',
         lang: 'zh-cn',
         hotkey: false,
-        fastForward: true,
+        // 内置长按加速仅移动端生效且倍率不可配，这里关闭，改用统一的自定义实现（触摸 + 鼠标，固定 3 倍速）
+        fastForward: false,
         autoOrientation: true,
         lock: true,
         moreVideoAttr: {
@@ -2056,15 +2145,20 @@ function PlayPageClient() {
             name: 'playback-rate',
             position: 'right',
             index: 20,
-            html: '<b>倍数</b>',
+            html: `<b>${formatPlaybackRateText(playbackRateRef.current)}</b>`,
             selector: getPlaybackRateSelector(),
-            onSelect: function(item: PlaybackRateSelector, $dom: HTMLElement){
-              artPlayerRef.current.playbackRate = item.value
-              return `<b>${item.name === '1x' ? '倍数' : item.name}</b>`
+            onSelect: function(item: PlaybackRateSelector){
+              // 记录并持久化，跳转下一集 / 重进页面都保持
+              applyUserPlaybackRate(item.value);
+              applyPlaybackRateToPlayer(item.value);
+              return `<b>${formatPlaybackRateText(item.value)}</b>`
             }
           }
         ],
       });
+
+      // 新建播放器后立即套用用户设定的倍速（首帧就生效，避免先 1x 再跳变）
+      applyPlaybackRateToPlayer(playbackRateRef.current);
       // 更新音量调节位置
       artPlayerRef.current.controls.update({
         name: 'volume',
@@ -2116,7 +2210,14 @@ function PlayPageClient() {
         lastVolumeRef.current = artPlayerRef.current.volume;
       });
       artPlayerRef.current.on('video:ratechange', () => {
-        lastPlaybackRateRef.current = artPlayerRef.current.playbackRate;
+        const rate = artPlayerRef.current?.playbackRate ?? 1;
+        // 长按加速期间产生的速率变化属于临时状态，不作为用户偏好记录
+        if (longPressRateActiveRef.current) return;
+        // 播放器被重置为 1x 或通过其它入口改变速率时，回写到用户偏好
+        if (Math.abs(rate - playbackRateRef.current) > 0.001) {
+          applyUserPlaybackRate(rate);
+          applyPlaybackRateToPlayer(rate);
+        }
       });
 
       // 监听视频可播放事件，这时恢复播放进度更可靠
@@ -2143,13 +2244,13 @@ function PlayPageClient() {
           ) {
             artPlayerRef.current.volume = lastVolumeRef.current;
           }
+          // 保持用户设定的倍速：无论 WebKit 还是其他内核，切集/换源后都恢复
           if (
             Math.abs(
-              artPlayerRef.current.playbackRate - lastPlaybackRateRef.current
-            ) > 0.01 &&
-            isWebkit
+              artPlayerRef.current.playbackRate - playbackRateRef.current
+            ) > 0.001
           ) {
-            artPlayerRef.current.playbackRate = lastPlaybackRateRef.current;
+            applyPlaybackRateToPlayer(playbackRateRef.current);
           }
           artPlayerRef.current.notice.show = '';
         }, 0);
@@ -2247,6 +2348,117 @@ function PlayPageClient() {
       setError('播放器初始化失败');
     }
   }, [Artplayer, Hls, videoUrl, loading, blockAdEnabled]);
+
+  // ---------------------------------------------------------------------------
+  // 长按画面 3 倍速播放（触摸 / 鼠标通用，主流播放器交互）
+  // ---------------------------------------------------------------------------
+  useEffect(() => {
+    const container = artRef.current;
+    if (!container) return;
+
+    // 控制栏 / 设置面板 / 通知等交互区域内的按压不视为长按加速
+    const INTERACTIVE_SELECTOR = [
+      '.art-bottom',
+      '.art-controls',
+      '.art-progress',
+      '.art-settings',
+      '.art-contextmenus',
+      '.art-notice',
+      '.art-mask',
+      '.art-volume-panel',
+      '.art-loading',
+      '.art-auto-playback-last',
+    ].join(', ');
+
+    const clearLongPressTimer = () => {
+      if (longPressRateTimerRef.current) {
+        clearTimeout(longPressRateTimerRef.current);
+        longPressRateTimerRef.current = null;
+      }
+    };
+
+    const stopLongPressRace = () => {
+      clearLongPressTimer();
+      if (!longPressRateActiveRef.current) return;
+
+      longPressRateActiveRef.current = false;
+      setIsLongPressRacing(false);
+
+      // 恢复到用户设定的倍速
+      const art = artPlayerRef.current;
+      if (art) {
+        try {
+          const video = art.video as HTMLVideoElement | undefined;
+          if (video) video.playbackRate = playbackRateRef.current;
+        } catch (_) {
+          // ignore
+        }
+      }
+
+      // 长按结束浏览器仍可能补发 click，拦截一次避免误触播放/暂停
+      suppressVideoClickRef.current = true;
+      setTimeout(() => {
+        suppressVideoClickRef.current = false;
+      }, 300);
+    };
+
+    const handlePointerDown = (event: PointerEvent) => {
+      if (event.pointerType === 'mouse' && event.button !== 0) return;
+
+      const art = artPlayerRef.current;
+      if (!art || !art.playing || art.isLock) return;
+
+      const target = event.target as Element | null;
+      if (target?.closest(INTERACTIVE_SELECTOR)) return;
+
+      clearLongPressTimer();
+      longPressRateTimerRef.current = setTimeout(() => {
+        const current = artPlayerRef.current;
+        if (!current || longPressRateActiveRef.current) return;
+        if (!current.playing) return;
+
+        longPressRateActiveRef.current = true;
+        setIsLongPressRacing(true);
+        try {
+          const video = current.video as HTMLVideoElement | undefined;
+          if (video) video.playbackRate = LONG_PRESS_RATE;
+        } catch (_) {
+          // ignore
+        }
+      }, LONG_PRESS_DELAY);
+    };
+
+    const handlePointerEnd = () => {
+      stopLongPressRace();
+    };
+
+    const handleClickCapture = (event: MouseEvent) => {
+      if (suppressVideoClickRef.current) {
+        event.stopPropagation();
+        event.preventDefault();
+        suppressVideoClickRef.current = false;
+      }
+    };
+
+    container.addEventListener('pointerdown', handlePointerDown);
+    container.addEventListener('pointerup', handlePointerEnd);
+    container.addEventListener('pointercancel', handlePointerEnd);
+    container.addEventListener('pointerleave', handlePointerEnd);
+    container.addEventListener('click', handleClickCapture, true);
+
+    return () => {
+      container.removeEventListener('pointerdown', handlePointerDown);
+      container.removeEventListener('pointerup', handlePointerEnd);
+      container.removeEventListener('pointercancel', handlePointerEnd);
+      container.removeEventListener('pointerleave', handlePointerEnd);
+      container.removeEventListener('click', handleClickCapture, true);
+      clearLongPressTimer();
+      if (longPressRateActiveRef.current) {
+        longPressRateActiveRef.current = false;
+        setIsLongPressRacing(false);
+      }
+    };
+  }, [loading, error]);
 
   
 
@@ -2494,9 +2706,34 @@ function PlayPageClient() {
                 <div
                   ref={artRef}
                   className='bg-black w-full h-full rounded-xl overflow-hidden shadow-lg'
+                  style={{
+                    WebkitTouchCallout: 'none',
+                    WebkitUserSelect: 'none',
+                    userSelect: 'none',
+                  }}
                 ></div>
 
-                
+                {/* 长按画面 3 倍速播放提示 */}
+                {isLongPressRacing && (
+                  <div className='pointer-events-none absolute inset-0 z-30 flex items-center justify-center'>
+                    <div className='animate-fade-in flex items-center gap-2 rounded-full bg-black/70 px-5 py-2.5 text-white shadow-lg backdrop-blur-sm'>
+                      <svg
+                        width='20'
+                        height='20'
+                        viewBox='0 0 24 24'
+                        fill='currentColor'
+                        xmlns='http://www.w3.org/2000/svg'
+                      >
+                        <path d='M4 5.5v13a1 1 0 0 0 1.53.85l10-6.5a1 1 0 0 0 0-1.7l-10-6.5A1 1 0 0 0 4 5.5z' />
+                        <path d='M17 5.5v13a1 1 0 0 0 2 0v-13a1 1 0 0 0-2 0z' />
+                      </svg>
+                      <span className='text-lg font-bold leading-none'>
+                        {LONG_PRESS_RATE}x
+                      </span>
+                      <span className='text-sm opacity-90'>快进中</span>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
 
