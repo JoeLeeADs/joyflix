@@ -10,10 +10,13 @@ import { Suspense, useEffect, useRef, useState } from 'react';
 
 import {
   deletePlayRecord,
+  deletePlaybackRateConfig,
   deleteSkipConfig,
   generateStorageKey,
   getAllPlayRecords,
+  getPlaybackRateConfig,
   getSkipConfig,
+  savePlaybackRateConfig,
   savePlayRecord,
   saveSkipConfig,
   subscribeToDataUpdates,
@@ -51,8 +54,9 @@ interface PlaybackRateSelector {
 // -----------------------------------------------------------------------------
 /** 可选播放速率 */
 const PLAYBACK_RATE_OPTIONS = [2.0, 1.5, 1.25, 1.0, 0.75, 0.5];
-/** 播放速率本地持久化 key（跨集数、跨会话保持） */
-const PLAYBACK_RATE_STORAGE_KEY = 'joyflix_playback_rate';
+/** 允许区间（容错：数据库里可能存了非预设的合法值） */
+const PLAYBACK_RATE_MIN = 0.25;
+const PLAYBACK_RATE_MAX = 4;
 /** 长按画面加速的倍率（主流播放器惯例） */
 const LONG_PRESS_RATE = 3;
 /** 长按判定时间（毫秒），超过该时长视为长按加速 */
@@ -61,6 +65,13 @@ const LONG_PRESS_DELAY = 400;
 /** 速率文案：1 倍速时显示「倍速」，其余显示具体数字（如 1.5x） */
 function formatPlaybackRateText(rate: number): string {
   return Math.abs(rate - 1) < 0.001 ? '倍速' : `${rate}x`;
+}
+
+/** 速率是否合法（预设值优先，同时容忍区间内的其他值） */
+function isValidPlaybackRate(rate: unknown): rate is number {
+  if (typeof rate !== 'number' || !Number.isFinite(rate)) return false;
+  if (PLAYBACK_RATE_OPTIONS.includes(rate)) return true;
+  return rate >= PLAYBACK_RATE_MIN && rate <= PLAYBACK_RATE_MAX;
 }
 
 function PlayPageClient() {
@@ -1460,6 +1471,21 @@ function PlayPageClient() {
         }
       }
 
+      // 倍速随线路一起迁移：同一部剧换线路，倍速要保持住
+      if (currentSourceRef.current && currentIdRef.current) {
+        try {
+          await deletePlaybackRateConfig(
+            currentSourceRef.current,
+            currentIdRef.current
+          );
+          await savePlaybackRateConfig(newSource, newId, {
+            rate: playbackRateRef.current,
+          });
+        } catch (err) {
+          console.error('迁移播放倍速配置失败:', err);
+        }
+      }
+
       const newDetail = availableSources.find(
         (source) => source.source === newSource && source.id === newId
       );
@@ -1796,13 +1822,14 @@ function PlayPageClient() {
     }));
   }
 
-  // 记录用户设定的倍速，并持久化到本地（跳集 / 重进页面都能保持）
+  // 记录用户设定的倍速（按「登录用户 + 剧集」维度写入数据库，与跳过片头片尾同构）
   const applyUserPlaybackRate = (rate: number) => {
     playbackRateRef.current = rate;
-    try {
-      localStorage.setItem(PLAYBACK_RATE_STORAGE_KEY, String(rate));
-    } catch (_) {
-      // 忽略隐私模式等写入失败
+    const source = currentSourceRef.current;
+    const id = currentIdRef.current;
+    if (source && id) {
+      // 乐观更新 + 异步落库；失败只打日志，不影响本次播放
+      void savePlaybackRateConfig(source, id, { rate });
     }
   };
 
@@ -1847,20 +1874,38 @@ function PlayPageClient() {
     }
   };
 
-  // 组件挂载后：从本地存储恢复用户上次设定的倍速
+  // 读取「当前登录用户 + 当前剧集」的倍速并套用。
+  //
+  // 与跳过片头片尾一样存在数据库里（键 u:{用户}:rate:{source}+{id}），所以：
+  // - 同一部剧跳集 / 重进页面 / 换线路：保持该剧自己的倍速；
+  // - 换一部剧：读回那部剧自己的倍速，**没有记录时回到默认 1x**（不再是上一部剧的值）。
   useEffect(() => {
-    let restored = 1.0;
-    try {
-      const raw = localStorage.getItem(PLAYBACK_RATE_STORAGE_KEY);
-      const parsed = raw ? Number.parseFloat(raw) : NaN;
-      if (PLAYBACK_RATE_OPTIONS.includes(parsed)) {
-        restored = parsed;
+    if (!currentSource || !currentId) return;
+
+    let cancelled = false;
+
+    const loadPlaybackRate = async () => {
+      let rate = 1.0;
+      try {
+        const config = await getPlaybackRateConfig(currentSource, currentId);
+        if (config && isValidPlaybackRate(config.rate)) {
+          rate = config.rate;
+        }
+      } catch (err) {
+        console.error('读取播放倍速配置失败:', err);
       }
-    } catch (_) {
-      // ignore
-    }
-    playbackRateRef.current = restored;
-  }, []);
+
+      if (cancelled) return;
+      playbackRateRef.current = rate;
+      applyPlaybackRateToPlayer(rate);
+    };
+
+    loadPlaybackRate();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentSource, currentId]);
 
   useEffect(() => {
     if (
@@ -2367,6 +2412,36 @@ function PlayPageClient() {
   }, [Artplayer, Hls, videoUrl, loading, blockAdEnabled]);
 
   // ---------------------------------------------------------------------------
+  // 播放器区域：屏蔽长按产生的「选字 / 放大镜 / 系统长按菜单」
+  //
+  // 样式层面已在 globals.css 的 `.jf-player *` 里禁用了选择与 touch-callout；
+  // 这里再拦一层事件，覆盖那些无视 CSS 的内核（部分国产内核浏览器会自己弹
+  // 「选择文字 / 复制 / 拖动」菜单，与 CSS 无关）。
+  //
+  // 只拦 contextmenu / selectstart / dragstart —— **不拦 touchstart**：
+  // artplayer 的单击播放/暂停依赖 <video> 的 click，iOS 上被 preventDefault 的
+  // touchstart 不会再生成 click，拦了就会出现「点画面不暂停」的回归。
+  // ---------------------------------------------------------------------------
+  useEffect(() => {
+    const container = artRef.current;
+    if (!container) return;
+
+    const blockEvent = (event: Event) => {
+      event.preventDefault();
+    };
+
+    container.addEventListener('contextmenu', blockEvent);
+    container.addEventListener('selectstart', blockEvent);
+    container.addEventListener('dragstart', blockEvent);
+
+    return () => {
+      container.removeEventListener('contextmenu', blockEvent);
+      container.removeEventListener('selectstart', blockEvent);
+      container.removeEventListener('dragstart', blockEvent);
+    };
+  }, [loading, error]);
+
+  // ---------------------------------------------------------------------------
   // 长按画面 3 倍速播放（触摸 / 鼠标通用，主流播放器交互）
   // ---------------------------------------------------------------------------
   useEffect(() => {
@@ -2737,7 +2812,7 @@ function PlayPageClient() {
               <div className='relative w-full h-[300px] lg:h-full'>
                 <div
                   ref={artRef}
-                  className='bg-black w-full h-full rounded-xl overflow-hidden shadow-lg'
+                  className='jf-player bg-black w-full h-full rounded-xl overflow-hidden shadow-lg'
                   style={{
                     WebkitTouchCallout: 'none',
                     WebkitUserSelect: 'none',

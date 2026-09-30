@@ -2,7 +2,7 @@
 
 import { AdminConfig } from './admin.types';
 import { RedisStorage } from './redis.db';
-import { Favorite, IStorage, PlayRecord, SkipConfig } from './types';
+import { Favorite, IStorage, PlayRecord, PlaybackRateConfig, SkipConfig } from './types';
 import { UpstashRedisStorage } from './upstash.db';
 
 // storage type 常量: 'localstorage' | 'redis' | 'upstash'，默认 'localstorage'
@@ -215,6 +215,57 @@ export class DbManager {
   ): Promise<{ [key: string]: SkipConfig }> {
     if (typeof (this.storage as any).getAllSkipConfigs === 'function') {
       return (this.storage as any).getAllSkipConfigs(userName);
+    }
+    return {};
+  }
+
+  // ---------- 播放倍速配置（按用户 + 剧集维度） ----------
+  async getPlaybackRateConfig(
+    userName: string,
+    source: string,
+    id: string
+  ): Promise<PlaybackRateConfig | null> {
+    if (typeof (this.storage as any).getPlaybackRateConfig === 'function') {
+      return (this.storage as any).getPlaybackRateConfig(userName, source, id);
+    }
+    return null;
+  }
+
+  async setPlaybackRateConfig(
+    userName: string,
+    source: string,
+    id: string,
+    config: PlaybackRateConfig
+  ): Promise<void> {
+    if (typeof (this.storage as any).setPlaybackRateConfig === 'function') {
+      await (this.storage as any).setPlaybackRateConfig(
+        userName,
+        source,
+        id,
+        config
+      );
+    }
+  }
+
+  async deletePlaybackRateConfig(
+    userName: string,
+    source: string,
+    id: string
+  ): Promise<void> {
+    if (typeof (this.storage as any).deletePlaybackRateConfig === 'function') {
+      await (this.storage as any).deletePlaybackRateConfig(
+        userName,
+        source,
+        id
+      );
+    }
+  }
+
+  async getAllPlaybackRateConfigs(
+    userName: string
+  ): Promise<{ [key: string]: PlaybackRateConfig }> {
+    if (typeof (this.storage as any).getAllPlaybackRateConfigs === 'function') {
+      return (this.storage as any).getAllPlaybackRateConfigs(userName);
     }
     return {};
   }

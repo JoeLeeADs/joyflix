@@ -13,6 +13,46 @@
   29 个 API 路由中有 18 个缺少自建鉴权、`/api/image-proxy` 与 `/api/admin/test-proxy` 存在 SSRF、
   以及 `Dockerfile` 依赖 `sed` 改写源码且失配时不报错。
 
+## [0.2.8] - 2026-09-30
+
+本版按需求做两件事：把**播放倍速**从「全局本地存储」改为「按登录用户 + 剧集存进数据库」，
+与已有的「跳过片头片尾」同构；以及**消除移动端长按画面时的选字 / 放大镜 / 系统长按菜单**。
+
+### 新增
+
+- **播放倍速按「用户 + 剧集」维度持久化** `src/lib/{types,db,redis.db,upstash.db}.ts`、
+  `src/app/api/rateconfigs/route.ts`、`src/lib/db.client.ts`、`src/app/play/page.tsx`
+  *背景*：v0.2.6 的倍速只存在 localStorage 的单个键里，属于**全局**状态——换一部剧会沿用上一部剧
+  的倍速。需求是像「跳过片头片尾」一样，按登录者 + 剧集各存一份。
+  *实现*：
+  - 存储键 `u:{用户}:rate:{source}+{id}`，与 skip 配置的 `u:{用户}:skip:{source}+{id}` 同构；
+    Redis / Upstash 双后端各自实现读写，并纳入 `deleteUser` 的清理范围（否则删号会残留垃圾键）。
+  - 新增 `/api/rateconfigs`（GET / POST / DELETE），鉴权、封禁校验、key 解析方式与
+    `/api/skipconfigs` 对齐；服务端校验倍速必须落在 `0.25 ~ 4`，越界返回 400，避免写入脏值。
+  - 前端 `db.client.ts` 增加倍速配置的混合缓存（缓存优先 + 后台同步）与乐观更新读写，
+    `refreshAllCache` / `getCacheStatus` 一并纳入。
+  - 播放页在 `[currentSource, currentId]` 变化时读回**该剧自己**的倍速；**没有记录时回到 1x**，
+    不再是上一部剧的值。同一部剧跳集 / 重进页面 / 退出重进都保持；换线路时与 skip 配置一样，
+    把当前倍速迁移到新线路对应的键上。
+  - 旧的全局 `localStorage.joyflix_playback_rate` 不再使用，**也不做迁移**：若把旧值搬到新剧上，
+    就正好复现了"换剧沿用了别的剧的倍速"这个问题。
+
+### 修复
+
+- **移动端长按画面会弹出选字手柄 / 放大镜 / 系统长按菜单** `src/app/globals.css`、`src/app/play/page.tsx`
+  *现象*：手机端长按画面触发 3 倍速的同时，会弹出文本选择框（带放大镜、可拖动）或系统长按菜单。
+  *原因*：artplayer 自带样式只写了**无前缀**的 `user-select: none`（实测包内 `-webkit-user-select`
+  出现 0 次），且完全没有 `-webkit-touch-callout`；而 `-webkit-touch-callout`、`-webkit-user-drag`
+  在多个内核里**并不是继承属性**，只声明在播放器容器上覆盖不到内部的 `<video>` 与各层；
+  另外部分国产内核浏览器会自己弹长按菜单，与 CSS 无关。
+  *修复*：`globals.css` 用 `.jf-player, .jf-player *` 对**全部后代**强制
+  `-webkit-user-select` / `user-select` / `-webkit-touch-callout` / `-webkit-user-drag` /
+  `-webkit-tap-highlight-color`，并把选中高亮改成透明；播放器容器加上 `jf-player` 类。
+  再在容器上拦截 `contextmenu` / `selectstart` / `dragstart` 做兜底。
+  **刻意不拦截 `touchstart`**：artplayer 的单击播放 / 暂停挂在 `<video>` 的 `click` 事件上，
+  而 iOS 上被 `preventDefault` 的 touchstart 之后不会再生成 `click`，
+  那样会引入"点画面无法暂停"这种比原问题更严重的回归。
+
 ## [0.2.7] - 2026-09-30
 
 本版处理 0.2.2 起挂账的**定时任务并发问题**：`/api/cron` 全量刷新可能被并发触发，

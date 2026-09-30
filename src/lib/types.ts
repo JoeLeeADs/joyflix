@@ -81,6 +81,27 @@ export interface IStorage {
   deleteSkipConfig(userName: string, source: string, id: string): Promise<void>;
   getAllSkipConfigs(userName: string): Promise<{ [key: string]: SkipConfig }>;
 
+  // 播放倍速配置相关（按用户 + 剧集维度存储）
+  getPlaybackRateConfig(
+    userName: string,
+    source: string,
+    id: string
+  ): Promise<PlaybackRateConfig | null>;
+  setPlaybackRateConfig(
+    userName: string,
+    source: string,
+    id: string,
+    config: PlaybackRateConfig
+  ): Promise<void>;
+  deletePlaybackRateConfig(
+    userName: string,
+    source: string,
+    id: string
+  ): Promise<void>;
+  getAllPlaybackRateConfigs(
+    userName: string
+  ): Promise<{ [key: string]: PlaybackRateConfig }>;
+
   // 分布式锁（可选实现，用于定时任务互斥）
   // 原子占锁：成功返回 true，锁已被他人持有返回 false
   acquireLock?(
@@ -147,4 +168,9 @@ export interface SkipConfig {
   enable: boolean; // 是否启用跳过片头片尾
   intro_time: number; // 片头时间（秒）
   outro_time: number; // 片尾时间（秒）
+}
+
+// 播放倍速配置数据结构（按用户 + 剧集维度存储）
+export interface PlaybackRateConfig {
+  rate: number; // 播放倍速，如 1.5
 }

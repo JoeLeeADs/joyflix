@@ -3,7 +3,13 @@
 import { createClient, RedisClientType } from 'redis';
 
 import { AdminConfig } from './admin.types';
-import { Favorite, IStorage, PlayRecord, SkipConfig } from './types';
+import {
+  Favorite,
+  IStorage,
+  PlayRecord,
+  PlaybackRateConfig,
+  SkipConfig,
+} from './types';
 
 // 搜索历史最大条数
 const SEARCH_HISTORY_LIMIT = 20;
@@ -232,6 +238,15 @@ export class RedisStorage implements IStorage {
     if (skipConfigKeys.length > 0) {
       await withRetry(() => this.client.del(skipConfigKeys));
     }
+
+    // 删除播放倍速配置
+    const rateConfigPattern = `u:${userName}:rate:*`;
+    const rateConfigKeys = await withRetry(() =>
+      this.client.keys(rateConfigPattern)
+    );
+    if (rateConfigKeys.length > 0) {
+      await withRetry(() => this.client.del(rateConfigKeys));
+    }
   }
 
   // ---------- 搜索历史 ----------
@@ -356,6 +371,76 @@ export class RedisStorage implements IStorage {
         if (match) {
           const sourceAndId = match[1];
           configs[sourceAndId] = JSON.parse(value as string) as SkipConfig;
+        }
+      }
+    });
+
+    return configs;
+  }
+
+  // ---------- 播放倍速配置（按用户 + 剧集维度） ----------
+  private rateConfigKey(user: string, source: string, id: string) {
+    return `u:${user}:rate:${source}+${id}`;
+  }
+
+  async getPlaybackRateConfig(
+    userName: string,
+    source: string,
+    id: string
+  ): Promise<PlaybackRateConfig | null> {
+    const val = await withRetry(() =>
+      this.client.get(this.rateConfigKey(userName, source, id))
+    );
+    return val ? (JSON.parse(val) as PlaybackRateConfig) : null;
+  }
+
+  async setPlaybackRateConfig(
+    userName: string,
+    source: string,
+    id: string,
+    config: PlaybackRateConfig
+  ): Promise<void> {
+    await withRetry(() =>
+      this.client.set(
+        this.rateConfigKey(userName, source, id),
+        JSON.stringify(config)
+      )
+    );
+  }
+
+  async deletePlaybackRateConfig(
+    userName: string,
+    source: string,
+    id: string
+  ): Promise<void> {
+    await withRetry(() =>
+      this.client.del(this.rateConfigKey(userName, source, id))
+    );
+  }
+
+  async getAllPlaybackRateConfigs(
+    userName: string
+  ): Promise<{ [key: string]: PlaybackRateConfig }> {
+    const pattern = `u:${userName}:rate:*`;
+    const keys = await withRetry(() => this.client.keys(pattern));
+
+    if (keys.length === 0) {
+      return {};
+    }
+
+    const configs: { [key: string]: PlaybackRateConfig } = {};
+
+    // 批量获取所有配置
+    const values = await withRetry(() => this.client.mGet(keys));
+
+    keys.forEach((key, index) => {
+      const value = values[index];
+      if (value) {
+        // 从key中提取source+id
+        const match = key.match(/^u:.+?:rate:(.+)$/);
+        if (match) {
+          const sourceAndId = match[1];
+          configs[sourceAndId] = JSON.parse(value as string) as PlaybackRateConfig;
         }
       }
     });

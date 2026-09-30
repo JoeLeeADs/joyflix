@@ -260,3 +260,37 @@ html.dark .swal2-speed-test-white-bg {
   border-bottom-left-radius: 0.75rem !important;
   border-bottom-right-radius: 0.75rem !important;
 }
+
+/* ---------------------------------------------------------------------------
+   播放器区域：禁用文本选择，消除移动端「长按画面」时弹出的
+   选字手柄 / 放大镜 / 系统长按菜单（长按加速的副作用）。
+
+   为什么要写在 `.jf-player *` 上而不是只写在容器上：
+   `-webkit-touch-callout`、`-webkit-user-drag` 在不少内核里**并非继承属性**，
+   只声明在容器上对内部节点（尤其是 <video> 与海报层）不生效；
+   artplayer 也只在 `.art-video-player` 上写了 user-select，覆盖不到它的兄弟/子层。
+
+   为什么**不**用 touchstart + preventDefault 来解决：
+   artplayer 的单击播放/暂停挂在 <video> 的 `click` 事件上（见双击/单击识别逻辑），
+   而 iOS 上被 preventDefault 的 touchstart 之后**不会再生成 click**，
+   那样会导致「点画面无法暂停」这种更严重的回归。这里只用样式 + 事件拦截。
+--------------------------------------------------------------------------- */
+.jf-player,
+.jf-player * {
+  -webkit-user-select: none !important;
+  -moz-user-select: none !important;
+  -ms-user-select: none !important;
+  user-select: none !important;
+  -webkit-touch-callout: none !important;
+  -webkit-user-drag: none !important;
+  -khtml-user-drag: none !important;
+  -moz-user-drag: none !important;
+  -webkit-tap-highlight-color: transparent !important;
+}
+
+/* 极少数内核下长按仍会闪一下选中高亮，直接把选中色做成透明 */
+.jf-player ::selection,
+.jf-player::selection {
+  background: transparent !important;
+  color: inherit !important;
+}

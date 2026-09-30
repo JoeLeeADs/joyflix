@@ -15,7 +15,7 @@
  */
 
 import { getAuthInfoFromBrowserCookie } from './auth';
-import { SkipConfig } from './types';
+import { PlaybackRateConfig, SkipConfig } from './types';
 
 // 全局错误触发函数
 function triggerGlobalError(message: string) {
@@ -65,6 +65,7 @@ interface UserCacheStore {
   favorites?: CacheData<Record<string, Favorite>>;
   searchHistory?: CacheData<string[]>;
   skipConfigs?: CacheData<Record<string, SkipConfig>>;
+  playbackRates?: CacheData<Record<string, PlaybackRateConfig>>;
 }
 
 // ---- 常量 ----
@@ -336,6 +337,35 @@ class HybridCacheManager {
 
     const userCache = this.getUserCache(username);
     userCache.skipConfigs = this.createCacheData(data);
+    this.saveUserCache(username, userCache);
+  }
+
+  /**
+   * 获取缓存的播放倍速配置
+   */
+  getCachedPlaybackRates(): Record<string, PlaybackRateConfig> | null {
+    const username = this.getCurrentUsername();
+    if (!username) return null;
+
+    const userCache = this.getUserCache(username);
+    const cached = userCache.playbackRates;
+
+    if (cached && this.isCacheValid(cached)) {
+      return cached.data;
+    }
+
+    return null;
+  }
+
+  /**
+   * 缓存播放倍速配置
+   */
+  cachePlaybackRates(data: Record<string, PlaybackRateConfig>): void {
+    const username = this.getCurrentUsername();
+    if (!username) return;
+
+    const userCache = this.getUserCache(username);
+    userCache.playbackRates = this.createCacheData(data);
     this.saveUserCache(username, userCache);
   }
 
@@ -1312,12 +1342,13 @@ export async function refreshAllCache(): Promise<void> {
 
   try {
     // 并行刷新所有数据
-    const [playRecords, favorites, searchHistory, skipConfigs] =
+    const [playRecords, favorites, searchHistory, skipConfigs, playbackRates] =
       await Promise.allSettled([
         fetchFromApi<Record<string, PlayRecord>>(`/api/playrecords`),
         fetchFromApi<Record<string, Favorite>>(`/api/favorites`),
         fetchFromApi<string[]>(`/api/searchhistory`),
         fetchFromApi<Record<string, SkipConfig>>(`/api/skipconfigs`),
+        fetchFromApi<Record<string, PlaybackRateConfig>>(`/api/rateconfigs`),
       ]);
 
     if (playRecords.status === 'fulfilled') {
@@ -1355,6 +1386,15 @@ export async function refreshAllCache(): Promise<void> {
         })
       );
     }
+
+    if (playbackRates.status === 'fulfilled') {
+      cacheManager.cachePlaybackRates(playbackRates.value);
+      window.dispatchEvent(
+        new CustomEvent('playbackRatesUpdated', {
+          detail: playbackRates.value,
+        })
+      );
+    }
   } catch (err) {
     console.error('刷新缓存失败:', err);
     triggerGlobalError('刷新缓存失败');
@@ -1370,6 +1410,7 @@ export function getCacheStatus(): {
   hasFavorites: boolean;
   hasSearchHistory: boolean;
   hasSkipConfigs: boolean;
+  hasPlaybackRates: boolean;
   username: string | null;
 } {
   if (STORAGE_TYPE === 'localstorage') {
@@ -1378,6 +1419,7 @@ export function getCacheStatus(): {
       hasFavorites: false,
       hasSearchHistory: false,
       hasSkipConfigs: false,
+      hasPlaybackRates: false,
       username: null,
     };
   }
@@ -1388,6 +1430,7 @@ export function getCacheStatus(): {
     hasFavorites: !!cacheManager.getCachedFavorites(),
     hasSearchHistory: !!cacheManager.getCachedSearchHistory(),
     hasSkipConfigs: !!cacheManager.getCachedSkipConfigs(),
+    hasPlaybackRates: !!cacheManager.getCachedPlaybackRates(),
     username: authInfo?.username || null,
   };
 }
@@ -1398,7 +1441,8 @@ export type CacheUpdateEvent =
   | 'playRecordsUpdated'
   | 'favoritesUpdated'
   | 'searchHistoryUpdated'
-  | 'skipConfigsUpdated';
+  | 'skipConfigsUpdated'
+  | 'playbackRatesUpdated';
 
 /**
  * 用于 React 组件监听数据更新的事件监听器
@@ -1711,6 +1755,207 @@ export async function deleteSkipConfig(
   } catch (err) {
     console.error('删除跳过片头片尾配置失败:', err);
     triggerGlobalError('删除跳过片头片尾配置失败');
+    throw err;
+  }
+}
+
+// -----------------------------------------------------------------------------
+// 播放倍速配置（按用户 + 剧集维度存储）
+//
+// 与「跳过片头片尾」同构：数据库模式下走 API + 混合缓存，localstorage 模式下走本地。
+// 区别在于倍速是**每部剧一套**，换剧时会读回该剧自己的倍速（没有则回到 1x）。
+// -----------------------------------------------------------------------------
+const PLAYBACK_RATE_LOCAL_KEY = 'moontv_playback_rates';
+
+/**
+ * 获取所有播放倍速配置。
+ * 数据库存储模式下使用混合缓存策略：优先返回缓存数据，后台异步同步最新数据。
+ */
+export async function getAllPlaybackRateConfigs(): Promise<
+  Record<string, PlaybackRateConfig>
+> {
+  // 服务器端渲染阶段直接返回空
+  if (typeof window === 'undefined') {
+    return {};
+  }
+
+  // 数据库存储模式：使用混合缓存策略（包括 redis 和 upstash）
+  if (STORAGE_TYPE !== 'localstorage') {
+    const cachedData = cacheManager.getCachedPlaybackRates();
+
+    if (cachedData) {
+      // 返回缓存数据，同时后台异步更新
+      fetchFromApi<Record<string, PlaybackRateConfig>>('/api/rateconfigs')
+        .then((freshData) => {
+          if (JSON.stringify(cachedData) !== JSON.stringify(freshData)) {
+            cacheManager.cachePlaybackRates(freshData);
+            window.dispatchEvent(
+              new CustomEvent('playbackRatesUpdated', {
+                detail: freshData,
+              })
+            );
+          }
+        })
+        .catch((err) => {
+          console.warn('后台同步播放倍速配置失败:', err);
+        });
+
+      return cachedData;
+    }
+
+    // 缓存为空，直接从 API 获取并缓存
+    try {
+      const freshData = await fetchFromApi<
+        Record<string, PlaybackRateConfig>
+      >('/api/rateconfigs');
+      cacheManager.cachePlaybackRates(freshData);
+      return freshData;
+    } catch (err) {
+      console.error('获取播放倍速配置失败:', err);
+      triggerGlobalError('获取播放倍速配置失败');
+      return {};
+    }
+  }
+
+  // localStorage 模式
+  try {
+    const raw = localStorage.getItem(PLAYBACK_RATE_LOCAL_KEY);
+    return raw ? (JSON.parse(raw) as Record<string, PlaybackRateConfig>) : {};
+  } catch (err) {
+    console.error('读取播放倍速配置失败:', err);
+    triggerGlobalError('读取播放倍速配置失败');
+    return {};
+  }
+}
+
+/**
+ * 获取指定剧集的播放倍速配置。没有记录时返回 null（调用方回退到 1x）。
+ */
+export async function getPlaybackRateConfig(
+  source: string,
+  id: string
+): Promise<PlaybackRateConfig | null> {
+  const key = generateStorageKey(source, id);
+  const configs = await getAllPlaybackRateConfigs();
+  return configs[key] || null;
+}
+
+/**
+ * 保存指定剧集的播放倍速配置。
+ * 数据库存储模式下使用乐观更新：先更新缓存，再异步同步到数据库。
+ */
+export async function savePlaybackRateConfig(
+  source: string,
+  id: string,
+  config: PlaybackRateConfig
+): Promise<void> {
+  const key = generateStorageKey(source, id);
+
+  // 数据库存储模式：乐观更新策略（包括 redis 和 upstash）
+  if (STORAGE_TYPE !== 'localstorage') {
+    const cachedConfigs = cacheManager.getCachedPlaybackRates() || {};
+    cachedConfigs[key] = config;
+    cacheManager.cachePlaybackRates(cachedConfigs);
+
+    window.dispatchEvent(
+      new CustomEvent('playbackRatesUpdated', {
+        detail: cachedConfigs,
+      })
+    );
+
+    try {
+      await fetchWithAuth('/api/rateconfigs', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ key, config }),
+      });
+    } catch (err) {
+      console.error('保存播放倍速配置失败:', err);
+      triggerGlobalError('保存播放倍速配置失败');
+    }
+    return;
+  }
+
+  // localStorage 模式
+  if (typeof window === 'undefined') {
+    console.warn('无法在服务端保存播放倍速配置到 localStorage');
+    return;
+  }
+
+  try {
+    const raw = localStorage.getItem(PLAYBACK_RATE_LOCAL_KEY);
+    const configs = raw
+      ? (JSON.parse(raw) as Record<string, PlaybackRateConfig>)
+      : {};
+    configs[key] = config;
+    localStorage.setItem(PLAYBACK_RATE_LOCAL_KEY, JSON.stringify(configs));
+    window.dispatchEvent(
+      new CustomEvent('playbackRatesUpdated', {
+        detail: configs,
+      })
+    );
+  } catch (err) {
+    console.error('保存播放倍速配置失败:', err);
+    triggerGlobalError('保存播放倍速配置失败');
+    throw err;
+  }
+}
+
+/**
+ * 删除指定剧集的播放倍速配置。
+ */
+export async function deletePlaybackRateConfig(
+  source: string,
+  id: string
+): Promise<void> {
+  const key = generateStorageKey(source, id);
+
+  // 数据库存储模式：乐观更新策略（包括 redis 和 upstash）
+  if (STORAGE_TYPE !== 'localstorage') {
+    const cachedConfigs = cacheManager.getCachedPlaybackRates() || {};
+    delete cachedConfigs[key];
+    cacheManager.cachePlaybackRates(cachedConfigs);
+
+    window.dispatchEvent(
+      new CustomEvent('playbackRatesUpdated', {
+        detail: cachedConfigs,
+      })
+    );
+
+    try {
+      await fetchWithAuth(`/api/rateconfigs?key=${encodeURIComponent(key)}`, {
+        method: 'DELETE',
+      });
+    } catch (err) {
+      console.error('删除播放倍速配置失败:', err);
+      triggerGlobalError('删除播放倍速配置失败');
+    }
+    return;
+  }
+
+  // localStorage 模式
+  if (typeof window === 'undefined') {
+    console.warn('无法在服务端删除播放倍速配置到 localStorage');
+    return;
+  }
+
+  try {
+    const raw = localStorage.getItem(PLAYBACK_RATE_LOCAL_KEY);
+    if (raw) {
+      const configs = JSON.parse(raw) as Record<string, PlaybackRateConfig>;
+      delete configs[key];
+      localStorage.setItem(PLAYBACK_RATE_LOCAL_KEY, JSON.stringify(configs));
+      window.dispatchEvent(
+        new CustomEvent('playbackRatesUpdated', {
+          detail: configs,
+        })
+      );
+    }
+  } catch (err) {
+    console.error('删除播放倍速配置失败:', err);
+    triggerGlobalError('删除播放倍速配置失败');
     throw err;
   }
 }
