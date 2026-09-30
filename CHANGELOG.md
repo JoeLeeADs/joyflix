@@ -38,6 +38,21 @@
   - 修复原实现的两个缺陷：倍速只在 WebKit 内核（iOS）重建播放器时恢复，其他内核切集后
     会被 `switch` 重置；以及控制栏文案永远停在「倍数」，不随实际倍速变化。
 
+### 修复
+
+- **倍速菜单展开后只剩「2x」一项** `src/app/play/page.tsx`
+
+  同步控制栏倍速文案时误用了 `art.controls.update({ name, html })`。artplayer 的
+  `Component.update()` 实现是**先 `remove` 再 `add`**，即销毁控件后重建；而 selector 的每一项
+  在首次渲染时已被 `Object.defineProperty`（`configurable: false`）写入
+  `$control_option` / `$control_item` / `$control_value` 三个只读属性，重建时对同一批 item
+  对象再次定义会抛 `TypeError`，**渲染循环在第 1 项就中断** —— 菜单里只剩「2x」，
+  且该异常被 `try/catch` 静默吞掉，页面上没有任何报错线索（靠 MutationObserver 观察
+  `.art-selector-list` 的 DOM 变化轨迹才定位到「先渲染 6 项、随即被清空重建为 1 项」）。
+
+  现改为直接更新文案节点 `.art-selector-value` 的 `innerHTML`，并手动维护
+  `.art-selector-item.art-current` 高亮，**不再触发控件重建**。
+
 ## [0.2.5] - 2026-09-29
 
 ### 修复

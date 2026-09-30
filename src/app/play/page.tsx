@@ -1807,6 +1807,14 @@ function PlayPageClient() {
   };
 
   // 将倍速写入播放器，并同步控制栏上的倍速文案
+  //
+  // 注意：这里**不能**用 `art.controls.update({ name, html })` 来更新文案。
+  // artplayer 的 Component.update() 实现是「remove + add」，即销毁控件再重建；
+  // 而 selector 的每一项在首次渲染时被 `Object.defineProperty`（configurable: false）
+  // 写入了 `$control_option` / `$control_item` / `$control_value` 三个只读属性，
+  // 重建时对同一批 item 对象再次定义会抛 TypeError，**循环在第 1 项就中断**，
+  // 菜单里就只剩「2x」一项（异常还会被 try/catch 静默吞掉，极难发现）。
+  // 所以这里直接改文案节点的 innerHTML，并手动维护 art-current 高亮。
   const applyPlaybackRateToPlayer = (rate: number) => {
     const art = artPlayerRef.current;
     if (!art) return;
@@ -1820,9 +1828,19 @@ function PlayPageClient() {
       // ignore
     }
     try {
-      art.controls.update({
-        name: 'playback-rate',
-        html: `<b>${formatPlaybackRateText(rate)}</b>`,
+      const $control = art.controls?.['playback-rate'] as HTMLElement | undefined;
+      const $value = $control?.querySelector('.art-selector-value');
+      if ($value) {
+        $value.innerHTML = `<b>${formatPlaybackRateText(rate)}</b>`;
+      }
+      $control?.querySelectorAll('.art-selector-item').forEach($item => {
+        const value = Number.parseFloat(
+          ($item as HTMLElement).dataset.value || ''
+        );
+        $item.classList.toggle(
+          'art-current',
+          Math.abs(value - rate) < 0.001
+        );
       });
     } catch (_) {
       // 控制栏尚未就绪时忽略
