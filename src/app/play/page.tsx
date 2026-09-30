@@ -2680,7 +2680,15 @@ function PlayPageClient() {
     // <video> 让出指针事件后，点击落在外层容器上。
     // artplayer 的单击 / 双击判定完全基于 <video> 的 click 时间戳，所以把 click 原样
     // 转发给 <video>（并透传坐标），它的 300ms 双击识别、播放/暂停、双击全屏都照常工作。
+    //
+    // ⚠️ 必须防重入：转发用的是 `dispatchEvent` 派发的**会冒泡**的合成 click，
+    // 它从 <video> 冒泡回本容器时监听器会**再次收到并再转发一次** ——
+    // 实测一次轻点会在 <video> 上打出 **43 个 click**（递归被运行时的事件分派深度上限截断），
+    // 于是 artplayer 的 300ms 单击/双击判定被瞬间灌满，单击/双击行为整体错乱
+    // （表现为"轻点没反应"、双击乱触发）。用重入标志把自己派发的事件整段忽略掉。
+    let forwardingClick = false;
     const handleForwardClick = (event: MouseEvent) => {
+      if (forwardingClick) return; // 自己派发的合成 click 冒泡回来：忽略
       if (suppressVideoClickRef.current) {
         suppressVideoClickRef.current = false;
         return;
@@ -2692,15 +2700,20 @@ function PlayPageClient() {
 
       const video = artPlayerRef.current?.video as HTMLVideoElement | undefined;
       if (!video) return;
-      video.dispatchEvent(
-        new MouseEvent('click', {
-          bubbles: true,
-          cancelable: true,
-          view: window,
-          clientX: event.clientX,
-          clientY: event.clientY,
-        })
-      );
+      forwardingClick = true;
+      try {
+        video.dispatchEvent(
+          new MouseEvent('click', {
+            bubbles: true,
+            cancelable: true,
+            view: window,
+            clientX: event.clientX,
+            clientY: event.clientY,
+          })
+        );
+      } finally {
+        forwardingClick = false;
+      }
     };
 
     container.addEventListener('pointerdown', handlePointerDown);
