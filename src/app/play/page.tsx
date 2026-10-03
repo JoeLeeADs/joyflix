@@ -2066,6 +2066,29 @@ function PlayPageClient() {
     // 重建播放器时同样重置长按加速状态
     resetLongPressRaceState();
 
+    // ── PiP 分支修正（iOS，v0.2.13）──────────────────────────────
+    // iPhone/iPad Safari 的 document.pictureInPictureEnabled 返回 true（iOS 13.4 起），
+    // artplayer 的 pip 模块据此走「标准 requestPictureInPicture()」分支；但 iPhone 上
+    // 该 API 会以 NotSupportedError 失败（平台限制），点击画中画按钮即报错。
+    // Apple 官方推荐的 iOS 路径是 webkitSetPresentationMode（presentation mode API），
+    // artplayer 恰好有该分支，只是被上面那个 if 挡住。
+    // → 仅在 iOS 设备上把 pictureInPictureEnabled「影子化」为 false（在 document
+    //   实例上定义同名自有属性，遮蔽 Document.prototype 的 getter），artplayer 便会
+    //   自己走 webkit 分支。桌面端（Chromium / macOS Safari）标准 API 可用，不受影响。
+    const isIOSDevice =
+      /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+      (navigator.userAgent.includes('Macintosh') && navigator.maxTouchPoints > 1);
+    if (isIOSDevice) {
+      try {
+        Object.defineProperty(document, 'pictureInPictureEnabled', {
+          value: false,
+          configurable: true,
+        });
+      } catch (_) {
+        // 影子化失败则维持原生行为
+      }
+    }
+
     try {
       // 创建新的播放器实例
       Artplayer.PLAYBACK_RATE = [0.5, 0.75, 1, 1.25, 1.5, 2];
@@ -2361,6 +2384,25 @@ function PlayPageClient() {
 
       // 新建播放器后立即套用用户设定的倍速（首帧就生效，避免先 1x 再跳变）
       applyPlaybackRateToPlayer(playbackRateRef.current);
+
+      // PiP 状态同步（WebKit/iOS，v0.2.13）：用户在系统画中画浮窗上点「关闭」时，
+      // presentation mode 变回 inline，但 artplayer 的 webkit 分支不监听该变化，
+      // pip 按钮的状态/文案会卡住。补一个同步，手动派发 art 的 pip 事件。
+      if (artPlayerRef.current?.video) {
+        const pipVideo = artPlayerRef.current.video as HTMLVideoElement & {
+          webkitPresentationMode?: string;
+        };
+        (pipVideo as HTMLVideoElement).addEventListener?.(
+          'webkitpresentationmodechanged' as any,
+          () => {
+            artPlayerRef.current?.emit(
+              'pip',
+              pipVideo.webkitPresentationMode === 'picture-in-picture'
+            );
+          }
+        );
+      }
+
       // 更新音量调节位置
       artPlayerRef.current.controls.update({
         name: 'volume',

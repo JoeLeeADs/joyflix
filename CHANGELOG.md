@@ -13,6 +13,21 @@
   29 个 API 路由中有 18 个缺少自建鉴权、`/api/image-proxy` 与 `/api/admin/test-proxy` 存在 SSRF、
   以及 `Dockerfile` 依赖 `sed` 改写源码且失配时不报错。
 
+## [0.2.13] - 2026-10-03
+
+**修复 iOS 上画中画（PiP）按钮报错**：
+
+- **根因**：iPhone/iPad Safari 的 `document.pictureInPictureEnabled` 返回 `true`（iOS 13.4 起），
+  artplayer 的 pip 模块据此走「标准 `requestPictureInPicture()`」分支；但 iPhone 上该 API
+  受平台限制会以 `NotSupportedError` 失败，点击画中画按钮即报错。
+- **修复**：仅在 iOS 设备上把 `document.pictureInPictureEnabled` 影子化为 `false`
+  （`document` 实例同名自有属性遮蔽原型 getter），artplayer 便自动改走
+  `webkitSetPresentationMode` 分支 —— 即 Apple 官方文档推荐的 iOS 路径。
+  桌面端（Chromium / macOS Safari）标准 API 可用，行为不变。
+- **补充**：监听 `webkitpresentationmodechanged`，用户在系统画中画浮窗点「关闭」后
+  同步播放器按钮状态（artplayer 的 webkit 分支自身不监听该事件，会卡在旧文案）。
+- 附带 `diagnose-pip.js` 诊断脚本（能力探测 + 手势点击 + 无手势对照 + 状态复位）。
+
 ## [0.2.12] - 2026-09-30
 
 **长按倍速改为用户可配置项**（真机确认 0.2.11 的音调与流畅度问题已解决）：
