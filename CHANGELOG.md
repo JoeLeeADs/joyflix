@@ -13,6 +13,25 @@
   29 个 API 路由中有 18 个缺少自建鉴权、`/api/image-proxy` 与 `/api/admin/test-proxy` 存在 SSRF、
   以及 `Dockerfile` 依赖 `sed` 改写源码且失配时不报错。
 
+## [0.2.16] - 2026-10-08
+
+**iPhone 画中画最终修复：真机诊断推翻假设，标准 API 直接可用**
+
+- **真机诊断**（`/pip-test.html`，iPhone iOS 18.7 Safari）：标准 `requestPictureInPicture()`
+  对 hls.js(MMS) 与原生 HLS **两条管线全部成功**弹出悬浮窗——此前「iPhone 不支持」的
+  判断被推翻（WebKit #303885 的问题是 iOS 26 + standalone 容器特有）。
+- **自伤定位**：v0.2.13 的 `pictureInPictureEnabled` 影子化让 v0.2.14 分档逻辑的标准 API
+  档被整段跳过，永远落到「进全屏」兜底——这正是「点画中画 = 进全屏」的原因。
+- **修复**：撤销影子化；分档重排为 标准 API 优先（含 `InvalidStateError` 时提示
+  「视频尚未加载完成」而非误导性降级）→ webkit presentation mode → 原生全屏兜底。
+
+## [0.2.15] - 2026-10-08
+
+**新增画中画真机自诊断页 `/pip-test.html`**：同一剧集分别以 hls.js(MMS) 与原生 HLS
+两条管线加载，逐项实测 `webkitSupportsPresentationMode` 函数探测、
+`requestPictureInPicture()` 实调（含错误原文）、`webkitSetPresentationMode` 实切，
+用于定位 iPhone 画中画不可用的决定性因素。`public/hls.light.min.js` 一并入库。
+
 ## [0.2.14] - 2026-10-08
 
 **修复 iPhone 上画中画按钮「点了没反应」**（0.2.13 真机反馈：不再报错，但也弹不出悬浮窗）：

@@ -2076,28 +2076,11 @@ function PlayPageClient() {
     // 重建播放器时同样重置长按加速状态
     resetLongPressRaceState();
 
-    // ── PiP 分支修正（iOS，v0.2.13）──────────────────────────────
-    // iPhone/iPad Safari 的 document.pictureInPictureEnabled 返回 true（iOS 13.4 起），
-    // artplayer 的 pip 模块据此走「标准 requestPictureInPicture()」分支；但 iPhone 上
-    // 该 API 会以 NotSupportedError 失败（平台限制），点击画中画按钮即报错。
-    // Apple 官方推荐的 iOS 路径是 webkitSetPresentationMode（presentation mode API），
-    // artplayer 恰好有该分支，只是被上面那个 if 挡住。
-    // → 仅在 iOS 设备上把 pictureInPictureEnabled「影子化」为 false（在 document
-    //   实例上定义同名自有属性，遮蔽 Document.prototype 的 getter），artplayer 便会
-    //   自己走 webkit 分支。桌面端（Chromium / macOS Safari）标准 API 可用，不受影响。
-    const isIOSDevice =
-      /iPad|iPhone|iPod/.test(navigator.userAgent) ||
-      (navigator.userAgent.includes('Macintosh') && navigator.maxTouchPoints > 1);
-    if (isIOSDevice) {
-      try {
-        Object.defineProperty(document, 'pictureInPictureEnabled', {
-          value: false,
-          configurable: true,
-        });
-      } catch (_) {
-        // 影子化失败则维持原生行为
-      }
-    }
+    // （v0.2.16 撤销 v0.2.13 的 pictureInPictureEnabled 影子化）
+    // 真机诊断（/pip-test.html，iOS 18.7 Safari）证明：iPhone 上标准
+    // requestPictureInPicture() 对 hls.js(MMS) 与原生 HLS 两条管线都完全可用；
+    // 影子化反而是自伤——它让 v0.2.14 分档逻辑的标准 API 档被整段跳过，
+    // 永远落到「进全屏」兜底。PiP 兼容问题已由播放页自己的分档切换解决。
 
     try {
       // 创建新的播放器实例
@@ -2413,20 +2396,14 @@ function PlayPageClient() {
         );
       }
 
-      // ── PiP 切换接管（v0.2.14，iPhone 真机实测 v0.2.13 仍无效后引入）──────────
-      // 真相（WebKit Bugzilla #303885 + Apple 官方文档交叉确认）：
-      //   iPhone 上 document.pictureInPictureEnabled 报 true 但不可信（WebKit 自认 bug），
-      //   requestPictureInPicture() 存在但必拒绝 NotSupportedError，
-      //   webkitSetPresentationMode 方法存在，但 'picture-in-picture' presentation mode
-      //   在 iPhone 上不被支持 → webkitSetPresentationMode('picture-in-picture') 静默无效。
-      //   唯一准确的探测是「把 webkitSupportsPresentationMode 当函数调用并传入模式」
-      //   （Apple 官方文档姿势），而 artplayer 只判断了「方法是否存在」。
-      // 因此接管 pip 按钮点击（捕获阶段拦截，artplayer 的内部分支全部绕开），分档：
-      //   ① 已在画中画 → 退出；
-      //   ② webkit 探测为 true（iPad / Mac Safari）→ presentation mode（Apple 官方路径）；
-      //   ③ 标准 API 可用（桌面 Chromium）→ requestPictureInPicture()；
-      //   ④ 都不行（iPhone）→ 进入系统原生全屏播放器，用户在原生控件里点画中画图标
-      //      （这是 iPhone 上唯一可靠的入口；离开 Safari 时系统也会自动画中画）。
+      // ── PiP 切换接管（v0.2.14 引入，v0.2.16 依据真机诊断结果重排）──────────
+      // 真机诊断（/pip-test.html，iPhone iOS 18.7 Safari）结论：
+      //   标准 requestPictureInPicture() 对 hls.js(MMS) 与原生 HLS 两条管线都可用；
+      //   webkitSupportsPresentationMode('picture-in-picture') 探测也为 true。
+      // 因此优先级改为：标准 API 优先（真机+桌面实测可用）→ webkit presentation
+      // mode（旧 iPad/Mac Safari 兜底）→ 原生全屏（最后手段）。
+      // 拦截方式不变：容器捕获阶段拦下 pip 按钮的 click（artplayer 内部分支探测
+      // 有缺陷且 art.pip setter 不可覆写），替换为本函数。
       const togglePictureInPicture = () => {
         const art = artPlayerRef.current;
         const v = art?.video as
@@ -2453,7 +2430,36 @@ function PlayPageClient() {
           return;
         }
 
-        // ② WebKit presentation mode（探测必须按函数调用，方法存在 ≠ 模式可用）
+        // ② 标准 API（真机 iPhone Safari / 桌面 Chromium 实测可用）
+        if (typeof v.requestPictureInPicture === 'function') {
+          v.requestPictureInPicture()
+            .then(() => art.emit('pip', true))
+            .catch((err: DOMException) => {
+              // 视频还没加载出元数据：提示稍后再试，不要降级到全屏误导用户
+              if (err?.name === 'InvalidStateError') {
+                art.notice.show = '视频尚未加载完成，请稍候再试';
+                return;
+              }
+              fallbackAfterStandardFailure(err);
+            });
+          return;
+        }
+        fallbackWithoutStandardApi();
+      };
+
+      // 标准 API 失败/缺失后的降级链（v0.2.16）
+      const fallbackAfterStandardFailure = (err?: DOMException) => {
+        const art = artPlayerRef.current;
+        const v = art?.video as
+          | (HTMLVideoElement & {
+              webkitPresentationMode?: string;
+              webkitSupportsPresentationMode?: (mode: string) => boolean;
+              webkitSetPresentationMode?: (mode: string) => void;
+              webkitEnterFullscreen?: () => void;
+            })
+          | undefined;
+        if (!art || !v) return;
+        // ③ WebKit presentation mode（旧 iPad / Mac Safari）
         if (
           typeof v.webkitSupportsPresentationMode === 'function' &&
           v.webkitSupportsPresentationMode('picture-in-picture') &&
@@ -2463,33 +2469,18 @@ function PlayPageClient() {
           art.emit('pip', true);
           return;
         }
-
-        // ③ 标准 API（桌面 Chromium；iPhone 上会拒绝，走 catch 落到 ④）
-        if (
-          document.pictureInPictureEnabled &&
-          typeof v.requestPictureInPicture === 'function'
-        ) {
-          v.requestPictureInPicture()
-            .then(() => art.emit('pip', true))
-            .catch(() => {
-              if (typeof v.webkitEnterFullscreen === 'function') {
-                art.notice.show = '已打开系统播放器，点其中的画中画图标';
-                v.webkitEnterFullscreen();
-              } else {
-                art.notice.show = '当前浏览器不支持画中画';
-              }
-            });
-          return;
-        }
-
-        // ④ 兜底：iPhone 唯一可靠入口是系统原生播放器（其控件自带画中画按钮）
+        // ④ 原生全屏兜底（系统播放器控件里自带画中画按钮）
         if (typeof v.webkitEnterFullscreen === 'function') {
           art.notice.show = '已打开系统播放器，点其中的画中画图标';
           v.webkitEnterFullscreen();
           return;
         }
-        art.notice.show = '当前浏览器不支持画中画';
+        art.notice.show =
+          '当前浏览器不支持画中画' + (err?.message ? `：${err.message}` : '');
       };
+
+      // 标准 API 不存在的环境（老 Firefox 等）：直接走降级链
+      const fallbackWithoutStandardApi = () => fallbackAfterStandardFailure();
 
       const handlePipCapture = (e: Event) => {
         const target = e.target as HTMLElement | null;
