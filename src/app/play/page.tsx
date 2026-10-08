@@ -216,6 +216,10 @@ function PlayPageClient() {
   const longPressRateActiveRef = useRef(false);
   const longPressRateTimerRef = useRef<NodeJS.Timeout | null>(null);
   const suppressVideoClickRef = useRef(false);
+  // PiP 按钮点击拦截（捕获阶段，v0.2.14）：artplayer 内部把 click 绑死在按钮上且其
+  // 分支探测有缺陷，无法覆写 art.pip setter（defineProperty configurable:false），
+  // 只能在容器上用捕获监听抢在它前面拦下 click，替换为下方按真实能力分档的切换逻辑。
+  const pipCaptureRef = useRef<((e: Event) => void) | null>(null);
   // 长按倍速（用户全局设置）。ref 供手势层在触发时读取（闭包里的值会过期），
   // state 供浮层文案渲染；两者经 applyLongPressRate 同步更新。
   const [longPressRate, setLongPressRate] =
@@ -603,6 +607,12 @@ function PlayPageClient() {
         // 销毁 HLS 实例
         if (artPlayerRef.current.video && artPlayerRef.current.video.hls) {
           artPlayerRef.current.video.hls.destroy();
+        }
+
+        // 摘除 PiP 按钮捕获拦截（若容器还在 DOM 上；art.destroy 可能不移除容器本身）
+        if (pipCaptureRef.current && artRef.current) {
+          artRef.current.removeEventListener('click', pipCaptureRef.current, true);
+          pipCaptureRef.current = null;
         }
 
         // 销毁 ArtPlayer 实例
@@ -2401,6 +2411,97 @@ function PlayPageClient() {
             );
           }
         );
+      }
+
+      // ── PiP 切换接管（v0.2.14，iPhone 真机实测 v0.2.13 仍无效后引入）──────────
+      // 真相（WebKit Bugzilla #303885 + Apple 官方文档交叉确认）：
+      //   iPhone 上 document.pictureInPictureEnabled 报 true 但不可信（WebKit 自认 bug），
+      //   requestPictureInPicture() 存在但必拒绝 NotSupportedError，
+      //   webkitSetPresentationMode 方法存在，但 'picture-in-picture' presentation mode
+      //   在 iPhone 上不被支持 → webkitSetPresentationMode('picture-in-picture') 静默无效。
+      //   唯一准确的探测是「把 webkitSupportsPresentationMode 当函数调用并传入模式」
+      //   （Apple 官方文档姿势），而 artplayer 只判断了「方法是否存在」。
+      // 因此接管 pip 按钮点击（捕获阶段拦截，artplayer 的内部分支全部绕开），分档：
+      //   ① 已在画中画 → 退出；
+      //   ② webkit 探测为 true（iPad / Mac Safari）→ presentation mode（Apple 官方路径）；
+      //   ③ 标准 API 可用（桌面 Chromium）→ requestPictureInPicture()；
+      //   ④ 都不行（iPhone）→ 进入系统原生全屏播放器，用户在原生控件里点画中画图标
+      //      （这是 iPhone 上唯一可靠的入口；离开 Safari 时系统也会自动画中画）。
+      const togglePictureInPicture = () => {
+        const art = artPlayerRef.current;
+        const v = art?.video as
+          | (HTMLVideoElement & {
+              webkitPresentationMode?: string;
+              webkitSupportsPresentationMode?: (mode: string) => boolean;
+              webkitSetPresentationMode?: (mode: string) => void;
+              webkitEnterFullscreen?: () => void;
+            })
+          | undefined;
+        if (!art || !v) return;
+
+        // ① 退出画中画
+        if (document.pictureInPictureElement) {
+          document
+            .exitPictureInPicture()
+            .then(() => art.emit('pip', false))
+            .catch(() => {});
+          return;
+        }
+        if (v.webkitPresentationMode === 'picture-in-picture') {
+          v.webkitSetPresentationMode?.('inline');
+          art.emit('pip', false);
+          return;
+        }
+
+        // ② WebKit presentation mode（探测必须按函数调用，方法存在 ≠ 模式可用）
+        if (
+          typeof v.webkitSupportsPresentationMode === 'function' &&
+          v.webkitSupportsPresentationMode('picture-in-picture') &&
+          typeof v.webkitSetPresentationMode === 'function'
+        ) {
+          v.webkitSetPresentationMode('picture-in-picture');
+          art.emit('pip', true);
+          return;
+        }
+
+        // ③ 标准 API（桌面 Chromium；iPhone 上会拒绝，走 catch 落到 ④）
+        if (
+          document.pictureInPictureEnabled &&
+          typeof v.requestPictureInPicture === 'function'
+        ) {
+          v.requestPictureInPicture()
+            .then(() => art.emit('pip', true))
+            .catch(() => {
+              if (typeof v.webkitEnterFullscreen === 'function') {
+                art.notice.show = '已打开系统播放器，点其中的画中画图标';
+                v.webkitEnterFullscreen();
+              } else {
+                art.notice.show = '当前浏览器不支持画中画';
+              }
+            });
+          return;
+        }
+
+        // ④ 兜底：iPhone 唯一可靠入口是系统原生播放器（其控件自带画中画按钮）
+        if (typeof v.webkitEnterFullscreen === 'function') {
+          art.notice.show = '已打开系统播放器，点其中的画中画图标';
+          v.webkitEnterFullscreen();
+          return;
+        }
+        art.notice.show = '当前浏览器不支持画中画';
+      };
+
+      const handlePipCapture = (e: Event) => {
+        const target = e.target as HTMLElement | null;
+        if (target?.closest?.('.art-control-pip')) {
+          e.stopPropagation();
+          e.preventDefault();
+          togglePictureInPicture();
+        }
+      };
+      if (artRef.current) {
+        artRef.current.addEventListener('click', handlePipCapture, true);
+        pipCaptureRef.current = handlePipCapture;
       }
 
       // 更新音量调节位置

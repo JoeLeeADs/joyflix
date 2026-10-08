@@ -13,6 +13,22 @@
   29 个 API 路由中有 18 个缺少自建鉴权、`/api/image-proxy` 与 `/api/admin/test-proxy` 存在 SSRF、
   以及 `Dockerfile` 依赖 `sed` 改写源码且失配时不报错。
 
+## [0.2.14] - 2026-10-08
+
+**修复 iPhone 上画中画按钮「点了没反应」**（0.2.13 真机反馈：不再报错，但也弹不出悬浮窗）：
+
+- **根因**（WebKit Bugzilla #303885 + Apple 官方文档确认）：iPhone 上
+  `webkitSetPresentationMode('picture-in-picture')` 是**静默无效**的 ——
+  `'picture-in-picture'` presentation mode 在 iPhone 上不被支持（iPad/Mac 才有），
+  唯一准确的探测是按函数调用 `video.webkitSupportsPresentationMode('picture-in-picture')`，
+  而 artplayer 的 webkit 分支只判断了「方法是否存在」。
+- **修复**：接管 pip 按钮点击（容器捕获阶段拦截，绕开 artplayer 全部内部分支），按真实能力分档：
+  ① 已在画中画 → 退出；② WebKit presentation mode 探测通过（iPad/Mac Safari）→ 走 Apple 官方路径；
+  ③ 标准 API 可用（桌面 Chromium）→ `requestPictureInPicture()`；
+  ④ 都不行（iPhone）→ 进入系统原生全屏播放器并提示，用户在原生控件里点画中画图标
+  （iPhone 上唯一可靠的编程入口；离开 Safari 时系统也会自动画中画）。
+- 保留 0.2.13 的 iOS `pictureInPictureEnabled` 影子化（兜住其他内部调用路径）。
+
 ## [0.2.13] - 2026-10-03
 
 **修复 iOS 上画中画（PiP）按钮报错**：
