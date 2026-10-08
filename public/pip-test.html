@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>PiP 能力真机诊断</title>
+<style>
+  body { font-family: -apple-system, sans-serif; margin: 0; padding: 16px; background: #f5f6fa; color: #222; }
+  h1 { font-size: 20px; } h2 { font-size: 16px; margin: 14px 0 8px; }
+  .card { background: #fff; border-radius: 12px; padding: 12px; margin-bottom: 14px; box-shadow: 0 1px 4px rgba(0,0,0,.08); }
+  video { width: 100%; border-radius: 8px; background: #000; max-height: 220px; }
+  button { font-size: 15px; padding: 10px 14px; margin: 6px 6px 0 0; border: 0; border-radius: 8px; background: #3b82f6; color: #fff; }
+  button.grey { background: #6b7280; }
+  pre { background: #f0f1f5; padding: 8px; border-radius: 8px; font-size: 12px; white-space: pre-wrap; word-break: break-all; min-height: 20px; }
+  .ok { color: #059669; font-weight: 600; } .bad { color: #dc2626; font-weight: 600; }
+  .tip { font-size: 13px; color: #555; }
+</style>
+</head>
+<body>
+<h1>iPhone 画中画（PiP）能力真机诊断</h1>
+<p class="tip">请用 <b>Safari</b> 打开本页（也欢迎用你常用的浏览器对比）。每部片先点「加载并播放」，出画面后再点「跑测试」。把页面结果（截图或复制）发给文文。</p>
+
+<div class="card">
+  <h2>0. 环境信息</h2>
+  <pre id="env">加载中…</pre>
+</div>
+
+<div class="card">
+  <h2>A. hls.js 管线（MSE/MMS —— 与播放页同款）</h2>
+  <video id="vA" playsinline controls muted></video>
+  <button onclick="loadA()">加载并播放</button>
+  <button class="grey" onclick="runTests('A','vA')">跑测试</button>
+  <pre id="outA">未测试（先加载并播放）</pre>
+</div>
+
+<div class="card">
+  <h2>B. 原生 HLS（video.src 直挂 m3u8，系统播放管线）</h2>
+  <video id="vB" playsinline controls muted></video>
+  <button onclick="loadB()">加载并播放</button>
+  <button class="grey" onclick="runTests('B','vB')">跑测试</button>
+  <pre id="outB">未测试（先加载并播放）</pre>
+</div>
+
+<div class="card">
+  <h2>对照：已知行为</h2>
+  <p class="tip">
+    ② 号测试若显示 supports=true → 该管线支持 presentation mode 画中画（iPad/Mac 常规）<br>
+    ③ 号测试若 Promise 成功 → 标准 API 可用（桌面 Chrome 常规）<br>
+    若 A、B 两部结果不同 → 结论 = 管线决定 PiP 能力，修复方向是 iPhone 换原生 HLS
+  </p>
+  <button class="grey" onclick="exitAll()">退出画中画</button>
+  <button class="grey" onclick="copyAll()">复制全部结果</button>
+</div>
+
+<script src="/hls.light.min.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const RESULTS = {};
+
+// 环境信息
+(function env() {
+  const v = document.createElement('video');
+  const ua = navigator.userAgent;
+  const iOSVer = (ua.match(/OS (\d+_\d+)/) || [])[1] || '?';
+  $('env').textContent = JSON.stringify({
+    UA关键词: /iPhone/.test(ua) ? 'iPhone' : /iPad/.test(ua) ? 'iPad' : /Macintosh/.test(ua) && navigator.maxTouchPoints > 1 ? 'iPad(桌面UA)' : '其他',
+    iOS版本: iOSVer.replace('_', '.'),
+    浏览器: /Safari/.test(ua) && !/Chrome|CriOS|FxiOS|EdgiOS|QQ|MicroMessenger/.test(ua) ? 'Safari' : ua.match(/CriOS|FxiOS|EdgiOS|QQBrowser|MicroMessenger|Quark|Alook|HbBrowser/)?.[0] || '第三方/未知',
+    pictureInPictureEnabled: document.pictureInPictureEnabled,
+    hasRequestPIP: typeof v.requestPictureInPicture,
+    hasWebkitSetMode: typeof v.webkitSetPresentationMode,
+    standalone: navigator.standalone === true || matchMedia('(display-mode: standalone)').matches,
+  }, null, 1);
+})();
+
+// 取一个真实剧集地址（同源带 cookie）
+async function getM3U8() {
+  const candidates = [
+    '/api/detail?source=lzi&id=88770',
+    '/api/detail?source=bfzy&id=117287',
+  ];
+  for (const url of candidates) {
+    try {
+      const r = await fetch(url);
+      const j = await r.json();
+      const ep = j?.episodes?.[0];
+      if (ep) return ep;
+    } catch (e) { /* 下一个 */ }
+  }
+  throw new Error('拿不到剧集地址（登录态失效或源不可用）');
+}
+
+let M3U8 = null;
+async function ensureM3U8() {
+  if (!M3U8) M3U8 = await getM3U8();
+  return M3U8;
+}
+
+async function loadA() {
+  try {
+    const url = await ensureM3U8();
+    const v = $('vA');
+    if (v.hls) v.hls.destroy();
+    if (!window.Hls || !Hls.isSupported()) {
+      $('outA').textContent = '❌ Hls.isSupported()=false —— 该设备/浏览器不支持 MSE/MMS，hls.js 管线不可用（这本身就是重要结论）';
+      return;
+    }
+    const hls = new Hls();
+    hls.loadSource(url);
+    hls.attachMedia(v);
+    v.hls = hls;
+    await v.play();
+    $('outA').textContent = '已加载（hls.js/MMS）。出画面后点「跑测试」。';
+  } catch (e) { $('outA').textContent = '加载失败：' + e.message; }
+}
+
+async function loadB() {
+  try {
+    const url = await ensureM3U8();
+    const v = $('vB');
+    v.src = url; // 原生 HLS：Safari 自己拉流
+    await v.play();
+    $('outB').textContent = '已加载（原生 HLS）。出画面后点「跑测试」。';
+  } catch (e) { $('outB').textContent = '加载失败：' + e.message; }
+}
+
+function fmt(name, ok, detail) {
+  return (ok ? '✅ ' : '❌ ') + name + (detail ? ' | ' + detail : '');
+}
+
+async function runTests(tag, vid) {
+  const v = $(vid);
+  const lines = [];
+  // 前置：媒体必须真的在播（readyState>=2）
+  if (v.readyState < 2) {
+    $(tag === 'A' ? 'outA' : 'outB').textContent = '❌ 媒体未就绪（readyState=' + v.readyState + '），等出画面后再测';
+    return;
+  }
+  lines.push('readyState=' + v.readyState + ' paused=' + v.paused + ' t=' + v.currentTime.toFixed(1));
+
+  // ② webkit presentation mode 函数探测
+  let probe = null;
+  try { probe = typeof v.webkitSupportsPresentationMode === 'function' ? v.webkitSupportsPresentationMode('picture-in-picture') : 'no-func'; } catch (e) { probe = 'threw:' + e.message; }
+  lines.push(fmt('② webkitSupportsPresentationMode("picture-in-picture")', probe === true, String(probe)));
+
+  // ③ 标准 API
+  let r3;
+  try {
+    await v.requestPictureInPicture();
+    r3 = '成功，pictureInPictureElement=' + (document.pictureInPictureElement === v);
+    lines.push(fmt('③ requestPictureInPicture()', true, r3));
+    RESULTS[tag] = lines.join('\n');
+    print(tag); return;
+  } catch (e) {
+    lines.push(fmt('③ requestPictureInPicture()', false, e.name + ': ' + e.message));
+  }
+
+  // ②b 若探测为 true，实际切 presentation mode 看是否真生效
+  if (probe === true) {
+    try {
+      v.webkitSetPresentationMode('picture-in-picture');
+      await new Promise(r => setTimeout(r, 800));
+      const mode = v.webkitPresentationMode;
+      lines.push(fmt('②b webkitSetPresentationMode 实切', mode === 'picture-in-picture', 'webkitPresentationMode=' + mode));
+    } catch (e) {
+      lines.push(fmt('②b webkitSetPresentationMode 实切', false, e.name + ': ' + e.message));
+    }
+  }
+
+  RESULTS[tag] = lines.join('\n');
+  print(tag);
+}
+
+function print(tag) { $(tag === 'A' ? 'outA' : 'outB').textContent = RESULTS[tag]; }
+
+async function exitAll() {
+  try { if (document.pictureInPictureElement) await document.exitPictureInPicture(); } catch (e) {}
+  document.querySelectorAll('video').forEach(v => { try { if (v.webkitPresentationMode === 'picture-in-picture') v.webkitSetPresentationMode('inline'); } catch (e) {} });
+}
+
+function copyAll() {
+  const text = '--- 环境 ---\n' + $('env').textContent + '\n--- A(hls.js/MMS) ---\n' + (RESULTS.A || '未测试') + '\n--- B(原生HLS) ---\n' + (RESULTS.B || '未测试');
+  navigator.clipboard?.writeText(text).then(() => alert('已复制，发给文文即可'), () => alert(text));
+}
+</script>
+</body>
+</html>
