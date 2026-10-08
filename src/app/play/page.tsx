@@ -2502,6 +2502,15 @@ function PlayPageClient() {
         index: 30
       });
 
+      // 画中画按钮挪到设置按钮之前（v0.2.17，用户要求）：
+      // 内置 pip 控件默认 index 40（排在 setting(30) 之后），更新为 25。
+      // pip 是普通按钮控件（无 selector 的 defineProperty 只读属性），可安全 update。
+      artPlayerRef.current.controls.update({
+        name: 'pip',
+        position: 'right',
+        index: 25
+      });
+
       // 监听网页全屏事件
       artPlayerRef.current.on('fullscreenWeb', (isWebFullscreen: boolean) => {
         if (artRef.current) {

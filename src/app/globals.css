@@ -172,12 +172,12 @@ div[data-media-provider] video {
   background-color: #000 !important; /* 其余区域填充为黑色 */
 }
 
-/* 隐藏移动端竖屏时的 pip 按钮 */
+/* 移动端竖屏精简控制栏（v0.2.17 调整）：
+   - fullscreenWeb（网页全屏）在手机上与全屏体验重复，继续隐藏；
+   - volume 在 iOS 上无意义（硬件键控制），继续隐藏；
+   - pip 不再隐藏！v0.2.16 起画中画在 iPhone 上可用（此前上游因标准 API 报错而隐藏），
+     按钮位置由播放页 controls.update 调整到设置按钮之前。 */
 @media (max-width: 768px) {
-  .art-control-pip {
-    display: none !important;
-  }
-
   .art-control-fullscreenWeb {
     display: none !important;
   }

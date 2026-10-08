@@ -13,6 +13,17 @@
   29 个 API 路由中有 18 个缺少自建鉴权、`/api/image-proxy` 与 `/api/admin/test-proxy` 存在 SSRF、
   以及 `Dockerfile` 依赖 `sed` 改写源码且失配时不报错。
 
+## [0.2.17] - 2026-10-08
+
+**移动端竖屏恢复画中画按钮，并移至设置按钮之前**
+
+- **根因**：上游遗留 CSS（`globals.css` 的 `@media (max-width:768px)`）把
+  `.art-control-pip` 整个隐藏，竖屏下按钮不可见（经竖屏视口诊断脚本证实
+  `display:none`、`visible:false`）。
+- **修复**：移除 pip 的隐藏规则（保留 fullscreenWeb / volume 的移动端隐藏）；
+  同时把 pip 控件 `index` 从内置默认 40 调整为 25，使其排在设置按钮（index 30）
+  之前——pip 为普通按钮控件，`controls.update` 安全。
+
 ## [0.2.16] - 2026-10-08
 
 **iPhone 画中画最终修复：真机诊断推翻假设，标准 API 直接可用**
