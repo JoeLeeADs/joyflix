@@ -13,6 +13,20 @@
   29 个 API 路由中有 18 个缺少自建鉴权、`/api/image-proxy` 与 `/api/admin/test-proxy` 存在 SSRF、
   以及 `Dockerfile` 依赖 `sed` 改写源码且失配时不报错。
 
+## [0.2.18] - 2026-10-08
+
+**iOS 主屏幕（standalone）模式隐藏画中画按钮并一次性提示**
+
+- **确认系统级封锁**：真机验证 standalone 模式下连系统全屏播放器（AVKit）里的
+  画中画图标也不存在。结合 WebKit Bug #303885（自 iOS 14.5 起，
+  `requestPictureInPicture()` 在主屏幕 Web App 中必败 `NotSupportedError`，
+  全格式全方式不可绕过），代码层面无解。
+- **处理**：检测 `navigator.standalone === true`（Safari 专有属性，桌面/安卓不受影响）
+  → 移除 pip 控件；首次进入播放页时弹一次提示「主屏幕模式受 iOS 限制不支持画中画，
+  请用 Safari 打开本站使用」（localStorage 记录，只提示一次）。
+- 非 standalone 环境（Safari 浏览器 / 桌面 / 安卓 PWA）行为不变：按钮位于设置之前，
+  点击走 v0.2.16 的分档逻辑。
+
 ## [0.2.17] - 2026-10-08
 
 **移动端竖屏恢复画中画按钮，并移至设置按钮之前**
