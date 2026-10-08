@@ -2487,6 +2487,21 @@ function PlayPageClient() {
         if (target?.closest?.('.art-control-pip')) {
           e.stopPropagation();
           e.preventDefault();
+          // iOS 主屏幕(standalone)模式：画中画被系统禁用（WebKit Bug #303885，自
+          // iOS 14.5 起 requestPictureInPicture 必败，系统播放器里也无画中画图标）。
+          // 该模式下每次点击只提示、不做任何动作（不落全屏兜底）。
+          // navigator.standalone 是 Safari 专有属性，桌面 Chrome / 安卓为 undefined。
+          if (
+            'standalone' in window.navigator &&
+            (window.navigator as Navigator & { standalone?: boolean }).standalone ===
+              true
+          ) {
+            if (artPlayerRef.current) {
+              artPlayerRef.current.notice.show =
+                '主屏幕模式受 iOS 限制不支持画中画，请用 Safari 打开本站使用';
+            }
+            return;
+          }
           togglePictureInPicture();
         }
       };
@@ -2502,46 +2517,15 @@ function PlayPageClient() {
         index: 30
       });
 
-      // 画中画按钮（v0.2.17 挪到设置按钮之前；v0.2.18 iOS 主屏幕模式隐藏）：
-      // iOS「添加到主屏幕」(standalone) 模式下画中画被系统禁用（WebKit Bug #303885，
-      // 自 iOS 14.5 起：requestPictureInPicture() 必败 NotSupportedError，系统播放器
-      // 里也没有画中画图标，而 document.pictureInPictureEnabled 仍返回 true，有欺骗性）。
-      // 该模式下移除按钮并一次性提示改用 Safari；其余环境按钮排在设置(30)之前。
-      // 注意 navigator.standalone 是 Safari 专有属性，桌面 Chrome / 安卓为 undefined，不受影响。
-      if (
-        'standalone' in window.navigator &&
-        (window.navigator as Navigator & { standalone?: boolean }).standalone === true
-      ) {
-        artPlayerRef.current.controls.remove('pip');
-        try {
-          const pipNoticeKey = 'joyflix:pip-standalone-notice';
-          if (!window.localStorage.getItem(pipNoticeKey)) {
-            window.localStorage.setItem(pipNoticeKey, '1');
-            const art = artPlayerRef.current;
-            // 延迟弹提示，避免覆盖续播等初始 notice
-            setTimeout(() => {
-              try {
-                if (art && !art.isDestroy) {
-                  art.notice.show =
-                    '主屏幕模式受 iOS 限制不支持画中画，请用 Safari 打开本站使用';
-                }
-              } catch {
-                /* 播放器已销毁 */
-              }
-            }, 3000);
-          }
-        } catch {
-          /* localStorage 不可用时静默跳过提示 */
-        }
-      } else {
-        // 内置 pip 控件默认 index 40（排在 setting(30) 之后），更新为 25。
-        // pip 是普通按钮控件（无 selector 的 defineProperty 只读属性），可安全 update。
-        artPlayerRef.current.controls.update({
-          name: 'pip',
-          position: 'right',
-          index: 25
-        });
-      }
+      // 画中画按钮挪到设置按钮之前（v0.2.17，用户要求；v0.2.19 起 standalone 也显示，
+      // 点击时在捕获 handler 里只提示不动作）：
+      // 内置 pip 控件默认 index 40（排在 setting(30) 之后），更新为 25。
+      // pip 是普通按钮控件（无 selector 的 defineProperty 只读属性），可安全 update。
+      artPlayerRef.current.controls.update({
+        name: 'pip',
+        position: 'right',
+        index: 25
+      });
 
       // 监听网页全屏事件
       artPlayerRef.current.on('fullscreenWeb', (isWebFullscreen: boolean) => {

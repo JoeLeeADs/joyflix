@@ -1,6 +1,6 @@
 {
   "name": "joyflix",
-  "version": "0.2.18",
+  "version": "0.2.19",
   "private": true,
   "scripts": {
     "dev": "pnpm gen:runtime && pnpm gen:manifest && next dev -H 0.0.0.0",
